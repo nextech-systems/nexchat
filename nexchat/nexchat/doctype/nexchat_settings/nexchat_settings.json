@@ -1,0 +1,113 @@
+{
+ "actions": [],
+ "creation": "2026-06-11 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "gateway_section",
+  "gateway_url",
+  "session_id",
+  "gateway_column",
+  "api_key",
+  "webhook_secret",
+  "sla_section",
+  "enable_sla",
+  "first_reminder_minutes",
+  "sla_column",
+  "escalation_minutes",
+  "supervisor_role"
+ ],
+ "fields": [
+  {
+   "fieldname": "gateway_section",
+   "fieldtype": "Section Break",
+   "label": "WhatsApp Gateway"
+  },
+  {
+   "fieldname": "gateway_url",
+   "fieldtype": "Data",
+   "label": "Gateway URL",
+   "description": "Base URL of the OpenWA gateway, no trailing slash. Example: http://11.0.11.17:2785"
+  },
+  {
+   "fieldname": "session_id",
+   "fieldtype": "Data",
+   "label": "Session ID",
+   "description": "OpenWA session UUID (Sessions page or GET /api/sessions)"
+  },
+  {
+   "fieldname": "gateway_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key"
+  },
+  {
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret",
+   "description": "Shared HMAC secret for verifying incoming webhooks from the gateway"
+  },
+  {
+   "fieldname": "sla_section",
+   "fieldtype": "Section Break",
+   "label": "Escalation"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_sla",
+   "fieldtype": "Check",
+   "label": "Enable SLA Alerts"
+  },
+  {
+   "default": "5",
+   "depends_on": "enable_sla",
+   "fieldname": "first_reminder_minutes",
+   "fieldtype": "Int",
+   "label": "First Reminder (minutes)"
+  },
+  {
+   "fieldname": "sla_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "15",
+   "depends_on": "enable_sla",
+   "fieldname": "escalation_minutes",
+   "fieldtype": "Int",
+   "label": "Escalate After (minutes)"
+  },
+  {
+   "depends_on": "enable_sla",
+   "fieldname": "supervisor_role",
+   "fieldtype": "Link",
+   "label": "Supervisor Role",
+   "options": "Role"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-06-11 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "NexChat",
+ "name": "NexChat Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
