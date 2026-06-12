@@ -113,7 +113,7 @@
   }
  ],
  "links": [],
- "modified": "2026-06-11 12:00:00.000000",
+ "modified": "2026-06-11 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "NexChat",
  "name": "WA Chat Message",
@@ -130,6 +130,16 @@
    "role": "System Manager",
    "share": 1,
    "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "NexChat Agent"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "NexChat Supervisor"
   }
  ],
  "sort_field": "timestamp",

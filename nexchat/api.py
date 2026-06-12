@@ -196,3 +196,66 @@ def normalize_number(number):
 	else:
 		return None
 	return digits
+
+
+@frappe.whitelist()
+def get_conversations(search=None):
+	"""Conversation list for the chat center, newest activity first."""
+	if not frappe.has_permission("WA Conversation", "read"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+
+	filters = {}
+	or_filters = None
+	if search:
+		search = f"%{search}%"
+		or_filters = [
+			["phone_number", "like", search],
+			["display_name", "like", search],
+			["customer", "like", search],
+		]
+	return frappe.get_all(
+		"WA Conversation",
+		filters=filters,
+		or_filters=or_filters,
+		fields=[
+			"name", "display_name", "status", "unread_count",
+			"last_message_preview", "modified", "customer",
+			"contact", "lead", "assigned_agent",
+		],
+		order_by="modified desc",
+		limit_page_length=200,
+	)
+
+
+@frappe.whitelist()
+def get_messages(conversation, limit=50):
+	"""Last N messages of a conversation, oldest first."""
+	if not frappe.has_permission("WA Conversation", "read"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	if not frappe.db.exists("WA Conversation", conversation):
+		frappe.throw("Conversation not found")
+
+	msgs = frappe.get_all(
+		"WA Chat Message",
+		filters={"conversation": conversation},
+		fields=[
+			"name", "direction", "content_type", "message",
+			"media_file", "timestamp", "ack_status", "sent_by",
+		],
+		order_by="timestamp desc",
+		limit_page_length=min(frappe.utils.cint(limit) or 50, 200),
+	)
+	return list(reversed(msgs))
+
+
+@frappe.whitelist()
+def mark_read(conversation):
+	"""Reset the unread counter when an agent opens a thread."""
+	if not frappe.has_permission("WA Conversation", "write"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	if frappe.db.exists("WA Conversation", conversation):
+		frappe.db.set_value(
+			"WA Conversation", conversation, "unread_count", 0,
+			update_modified=False,
+		)
+	return True
