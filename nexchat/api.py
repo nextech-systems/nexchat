@@ -2,21 +2,32 @@
 # For license information, please see license.txt
 
 import re
+import time
 
 import requests
 import frappe
 
 
-def _gateway():
-	"""Return (settings, base_url, headers) or throw if unconfigured."""
+def _default_session_id(settings):
+	"""Preferred session: default+active record, else any active record,
+	else the legacy session_id in settings."""
+	sid = frappe.db.get_value(
+		"NexChat Session", {"is_default": 1, "active": 1}
+	) or frappe.db.get_value("NexChat Session", {"active": 1})
+	return sid or settings.session_id
+
+
+def _gateway(session=None):
+	"""Return (settings, base_url, headers) for a session (or the default)."""
 	settings = frappe.get_single("NexChat Settings")
-	if not (settings.gateway_url and settings.session_id):
-		frappe.throw("NexChat Settings incomplete: set Gateway URL and Session ID")
+	session_id = session or _default_session_id(settings)
+	if not (settings.gateway_url and session_id):
+		frappe.throw("NexChat Settings incomplete: set Gateway URL and add a Session")
 	headers = {
 		"X-Api-Key": settings.get_password("api_key") or "",
 		"Content-Type": "application/json",
 	}
-	base = f"{settings.gateway_url}/api/sessions/{settings.session_id}"
+	base = f"{settings.gateway_url}/api/sessions/{session_id}"
 	return settings, base, headers
 
 
@@ -57,6 +68,49 @@ def _resolve_chat_id(base, headers, chat_id):
 	return chat_id
 
 
+def _enforce_send_limits(settings, session):
+	"""Server-side throttle protecting the number from ban-triggering bursts.
+	Applies per session. A short gap is absorbed by sleeping; the per-minute
+	cap raises so callers (UI, hooks) get clear backpressure."""
+	per_minute = frappe.utils.cint(settings.get("max_per_minute"))
+	gap = frappe.utils.cint(settings.get("min_send_gap"))
+	session = session or ""
+
+	if per_minute:
+		count = frappe.db.sql(
+			"""
+			SELECT COUNT(*)
+			FROM `tabWA Chat Message` m
+			JOIN `tabWA Conversation` c ON m.conversation = c.name
+			WHERE m.direction = 'Outgoing'
+			  AND m.timestamp > DATE_SUB(NOW(), INTERVAL 60 SECOND)
+			  AND IFNULL(c.session, '') = %s
+			""",
+			(session,),
+		)[0][0]
+		if count >= per_minute:
+			frappe.throw(
+				f"Sending limit reached ({per_minute}/minute) - wait a moment. "
+				"This protects the WhatsApp number from being blocked."
+			)
+
+	if gap:
+		last = frappe.db.sql(
+			"""
+			SELECT MAX(m.timestamp)
+			FROM `tabWA Chat Message` m
+			JOIN `tabWA Conversation` c ON m.conversation = c.name
+			WHERE m.direction = 'Outgoing'
+			  AND IFNULL(c.session, '') = %s
+			""",
+			(session,),
+		)[0][0]
+		if last:
+			elapsed = (frappe.utils.now_datetime() - last).total_seconds()
+			if elapsed < gap:
+				time.sleep(min(gap - elapsed, 10))
+
+
 @frappe.whitelist()
 def send_message(conversation, message):
 	"""Send a text message into an existing conversation. Returns the
@@ -79,7 +133,8 @@ def send_message(conversation, message):
 			order_by="timestamp desc",
 		) or f"{conv.phone_number}@c.us"
 
-	_settings, base, headers = _gateway()
+	_settings, base, headers = _gateway(conv.session or None)
+	_enforce_send_limits(_settings, conv.session)
 	chat_id = _resolve_chat_id(base, headers, chat_id)
 
 	gateway_unconfirmed = False
@@ -213,18 +268,25 @@ def get_conversations(search=None):
 			["display_name", "like", search],
 			["customer", "like", search],
 		]
-	return frappe.get_all(
+	convs = frappe.get_all(
 		"WA Conversation",
 		filters=filters,
 		or_filters=or_filters,
 		fields=[
 			"name", "display_name", "status", "unread_count",
 			"last_message_preview", "modified", "customer",
-			"contact", "lead", "assigned_agent",
+			"contact", "lead", "assigned_agent", "resolved_number", "session",
 		],
 		order_by="modified desc",
 		limit_page_length=200,
 	)
+	labels = {
+		s.name: s.session_label
+		for s in frappe.get_all("NexChat Session", fields=["name", "session_label"])
+	}
+	for c in convs:
+		c["session_label"] = labels.get(c.get("session")) or ""
+	return convs
 
 
 @frappe.whitelist()

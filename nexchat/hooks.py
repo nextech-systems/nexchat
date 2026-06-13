@@ -214,4 +214,4 @@ app_license = "MIT"
 # 	"nexchat.auth.validate"
 # ]
 
-after_migrate = ["nexchat.setup.ensure_roles"]
+after_migrate = ["nexchat.setup.after_migrate"]

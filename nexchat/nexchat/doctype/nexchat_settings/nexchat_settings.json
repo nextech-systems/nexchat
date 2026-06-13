@@ -11,6 +11,10 @@
   "gateway_column",
   "api_key",
   "webhook_secret",
+  "rate_section",
+  "max_per_minute",
+  "rate_column",
+  "min_send_gap",
   "sla_section",
   "enable_sla",
   "first_reminder_minutes",
@@ -52,6 +56,29 @@
    "description": "Shared HMAC secret for verifying incoming webhooks from the gateway"
   },
   {
+   "fieldname": "rate_section",
+   "fieldtype": "Section Break",
+   "label": "Sending Limits"
+  },
+  {
+   "default": "8",
+   "fieldname": "max_per_minute",
+   "fieldtype": "Int",
+   "label": "Max Messages Per Minute",
+   "description": "Per session. Hard stop above this; 0 disables. Keep modest to protect the number from bans."
+  },
+  {
+   "fieldname": "rate_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "3",
+   "fieldname": "min_send_gap",
+   "fieldtype": "Int",
+   "label": "Minimum Seconds Between Sends",
+   "description": "Per session. Short waits are applied automatically; 0 disables."
+  },
+  {
    "fieldname": "sla_section",
    "fieldtype": "Section Break",
    "label": "Escalation"
@@ -90,7 +117,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-06-11 12:00:00.000000",
+ "modified": "2026-06-12 11:00:00.000000",
  "modified_by": "Administrator",
  "module": "NexChat",
  "name": "NexChat Settings",

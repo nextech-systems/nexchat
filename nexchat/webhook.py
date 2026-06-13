@@ -121,6 +121,9 @@ def _unwrap(data):
 
 def _handle_message(event_type, data):
 	m = _unwrap(data)
+	session_id = data.get("sessionId") or ""
+	if session_id and not frappe.db.exists("NexChat Session", session_id):
+		session_id = ""
 	incoming = event_type == "message.received"
 
 	# whatsapp-web.js puts our own sends in message.received with fromMe=true
@@ -153,7 +156,7 @@ def _handle_message(event_type, data):
 		content_type = "other"
 
 	timestamp = _extract_timestamp(m)
-	conversation = _get_or_create_conversation(phone, m, incoming, chat_id)
+	conversation = _get_or_create_conversation(phone, m, incoming, chat_id, session_id)
 
 	msg = frappe.get_doc(
 		{
@@ -172,6 +175,8 @@ def _handle_message(event_type, data):
 	updates = {"last_message_preview": (body or f"[{content_type}]")[:140]}
 	if chat_id and conversation.get("chat_id") != chat_id and incoming:
 		updates["chat_id"] = chat_id
+	if session_id and not conversation.get("session"):
+		updates["session"] = session_id
 	if incoming:
 		updates["last_incoming_at"] = timestamp
 		updates["unread_count"] = (conversation.unread_count or 0) + 1
@@ -234,7 +239,7 @@ def _extract_timestamp(m):
 		return frappe.utils.now_datetime()
 
 
-def _get_or_create_conversation(phone, m, incoming, chat_id=""):
+def _get_or_create_conversation(phone, m, incoming, chat_id="", session_id=""):
 	if frappe.db.exists("WA Conversation", phone):
 		return frappe.get_doc("WA Conversation", phone)
 
@@ -254,10 +259,17 @@ def _get_or_create_conversation(phone, m, incoming, chat_id=""):
 				"phone_number": phone,
 				"display_name": display_name,
 				"chat_id": chat_id if incoming else "",
+				"session": session_id,
 				"status": "Open",
 			}
 		)
 		conv.insert(ignore_permissions=True)
+		frappe.enqueue(
+			"nexchat.crm.try_auto_link",
+			conversation_name=conv.name,
+			queue="short",
+			enqueue_after_commit=True,
+		)
 		return conv
 	except frappe.DuplicateEntryError:
 		return frappe.get_doc("WA Conversation", phone)

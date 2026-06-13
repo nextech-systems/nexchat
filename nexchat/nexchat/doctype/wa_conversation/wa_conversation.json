@@ -9,6 +9,8 @@
   "phone_number",
   "display_name",
   "chat_id",
+  "resolved_number",
+  "session",
   "conv_column_a",
   "status",
   "sla_state",
@@ -50,6 +52,21 @@
    "label": "Chat ID",
    "read_only": 1,
    "description": "Gateway address for replies, e.g. 18765551234@c.us or ...@lid"
+  },
+  {
+   "fieldname": "resolved_number",
+   "fieldtype": "Data",
+   "label": "Resolved Number",
+   "read_only": 1,
+   "description": "Real phone number resolved from a LID privacy address"
+  },
+  {
+   "fieldname": "session",
+   "fieldtype": "Link",
+   "label": "Session",
+   "options": "NexChat Session",
+   "read_only": 1,
+   "in_standard_filter": 1
   },
   {
    "fieldname": "conv_column_a",
@@ -160,7 +177,7 @@
   }
  ],
  "links": [],
- "modified": "2026-06-11 18:00:00.000000",
+ "modified": "2026-06-12 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "NexChat",
  "name": "WA Conversation",
