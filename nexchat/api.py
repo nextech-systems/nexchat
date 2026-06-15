@@ -124,6 +124,10 @@ def send_message(conversation, message):
 		frappe.throw("Message exceeds 4096 characters")
 
 	conv = frappe.get_doc("WA Conversation", conversation)
+
+	from nexchat.locks import claim_on_reply
+	claim_on_reply(conv.name, frappe.session.user)
+
 	chat_id = conv.chat_id
 	if not chat_id:
 		chat_id = frappe.db.get_value(
@@ -254,13 +258,19 @@ def normalize_number(number):
 
 
 @frappe.whitelist()
-def get_conversations(search=None):
+def get_conversations(search=None, tab="all"):
 	"""Conversation list for the chat center, newest activity first."""
 	if not frappe.has_permission("WA Conversation", "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
 
 	filters = {}
 	or_filters = None
+
+	from nexchat.permissions import permitted_sessions
+	sess = permitted_sessions(frappe.session.user)
+	if sess is not None:
+		filters["session"] = ["in", sess]
+
 	if search:
 		search = f"%{search}%"
 		or_filters = [
@@ -268,6 +278,13 @@ def get_conversations(search=None):
 			["display_name", "like", search],
 			["customer", "like", search],
 		]
+	me = frappe.session.user
+	if tab == "mine":
+		filters["assigned_agent"] = me
+	elif tab == "unassigned":
+		filters["assigned_agent"] = ["in", ["", None]]
+	# "all" applies no assignment filter (still session-scoped above)
+
 	convs = frappe.get_all(
 		"WA Conversation",
 		filters=filters,
@@ -276,16 +293,34 @@ def get_conversations(search=None):
 			"name", "display_name", "status", "unread_count",
 			"last_message_preview", "modified", "customer",
 			"contact", "lead", "assigned_agent", "resolved_number", "session",
+			"last_agent", "claimed_at", "sla_state",
+			"last_incoming_at", "last_outgoing_at",
 		],
 		order_by="modified desc",
 		limit_page_length=200,
 	)
+	# sticky highlight: returning customers whose last agent is me
+	for c in convs:
+		c["sticky_mine"] = bool(
+			not c.get("assigned_agent") and c.get("last_agent") == me
+		)
+		c["waiting"] = bool(
+			c.get("last_incoming_at")
+			and (not c.get("last_outgoing_at") or c["last_outgoing_at"] < c["last_incoming_at"])
+		)
 	labels = {
 		s.name: s.session_label
 		for s in frappe.get_all("NexChat Session", fields=["name", "session_label"])
 	}
+	agent_names = {}
 	for c in convs:
 		c["session_label"] = labels.get(c.get("session")) or ""
+		if c.get("assigned_agent") and c["assigned_agent"] not in agent_names:
+			agent_names[c["assigned_agent"]] = frappe.get_cached_value(
+				"User", c["assigned_agent"], "full_name"
+			) or c["assigned_agent"]
+		c["assigned_agent_name"] = agent_names.get(c.get("assigned_agent"), "")
+	convs.sort(key=lambda c: (not c["sticky_mine"], not c["waiting"]))
 	return convs
 
 
@@ -321,3 +356,68 @@ def mark_read(conversation):
 			update_modified=False,
 		)
 	return True
+
+
+@frappe.whitelist()
+def workload_counts():
+	"""Top-bar counts: mine, unassigned, overdue (escalated) - session scoped."""
+	if not frappe.has_permission("WA Conversation", "read"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	me = frappe.session.user
+
+	from nexchat.permissions import permitted_sessions
+	sess = permitted_sessions(me)
+	base = {"status": "Open"}
+	if sess is not None:
+		base["session"] = ["in", sess]
+
+	mine = frappe.db.count("WA Conversation", {**base, "assigned_agent": me})
+	unassigned = frappe.db.count(
+		"WA Conversation", {**base, "assigned_agent": ["in", ["", None]]}
+	)
+	overdue = frappe.db.count("WA Conversation", {**base, "sla_state": "Escalated"})
+	return {"mine": mine, "unassigned": unassigned, "overdue": overdue}
+
+
+@frappe.whitelist()
+def customer_summary(conversation):
+	"""Light inline summary for the right column. Heavy detail stays on the
+	customer form (we just deep-link there)."""
+	if not frappe.has_permission("WA Conversation", "read"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	conv = frappe.get_doc("WA Conversation", conversation)
+	out = {
+		"customer": conv.customer,
+		"contact": conv.contact,
+		"lead": conv.lead,
+		"display_name": conv.display_name,
+		"resolved_number": conv.resolved_number or conv.phone_number,
+	}
+	if not conv.customer:
+		return out
+
+	cust = frappe.get_cached_doc("Customer", conv.customer)
+	out["customer_name"] = cust.customer_name
+
+	# outstanding balance via GL (party balance)
+	try:
+		from erpnext.accounts.utils import get_balance_on
+		out["balance"] = get_balance_on(
+			party_type="Customer", party=conv.customer
+		)
+	except Exception:
+		out["balance"] = None
+
+	out["open_orders"] = frappe.db.count(
+		"Sales Order",
+		{"customer": conv.customer, "docstatus": 1, "status": ["not in", ["Closed", "Completed"]]},
+	)
+	last_so = frappe.get_all(
+		"Sales Order",
+		filters={"customer": conv.customer, "docstatus": 1},
+		fields=["transaction_date"],
+		order_by="transaction_date desc",
+		limit_page_length=1,
+	)
+	out["last_order_date"] = last_so[0].transaction_date if last_so else None
+	return out

@@ -23,6 +23,8 @@
   "assigned_agent",
   "assign_column",
   "claimed_at",
+  "last_agent",
+  "reminded_at",
   "activity_section",
   "last_incoming_at",
   "last_outgoing_at",
@@ -141,6 +143,21 @@
    "read_only": 1
   },
   {
+   "fieldname": "last_agent",
+   "fieldtype": "Link",
+   "label": "Last Agent",
+   "options": "User",
+   "read_only": 1,
+   "description": "Most recent agent to handle this conversation; persists across release for sticky routing"
+  },
+  {
+   "fieldname": "reminded_at",
+   "fieldtype": "Datetime",
+   "label": "Reminded At",
+   "read_only": 1,
+   "description": "When the first SLA reminder was sent (internal)"
+  },
+  {
    "fieldname": "activity_section",
    "fieldtype": "Section Break",
    "label": "Activity"
@@ -177,7 +194,7 @@
   }
  ],
  "links": [],
- "modified": "2026-06-12 10:00:00.000000",
+ "modified": "2026-06-12 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "NexChat",
  "name": "WA Conversation",

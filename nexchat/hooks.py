@@ -215,3 +215,19 @@ app_license = "MIT"
 # ]
 
 after_migrate = ["nexchat.setup.after_migrate"]
+
+scheduler_events = {
+	"cron": {
+		"* * * * *": [
+			"nexchat.locks.run_sla_checks"
+		]
+	}
+}
+
+permission_query_conditions = {
+	"WA Conversation": "nexchat.permissions.conversation_query"
+}
+
+has_permission = {
+	"WA Conversation": "nexchat.permissions.has_conversation_permission"
+}

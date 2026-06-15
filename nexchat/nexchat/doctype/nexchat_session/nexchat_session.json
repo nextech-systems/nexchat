@@ -13,7 +13,9 @@
   "department",
   "flags_section",
   "is_default",
-  "active"
+  "active",
+  "coverage_section",
+  "agents"
  ],
  "fields": [
   {
@@ -65,10 +67,22 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Active"
+  },
+  {
+   "fieldname": "coverage_section",
+   "fieldtype": "Section Break",
+   "label": "Queue Coverage",
+   "description": "Users listed here see this session's conversations. Saving syncs their access automatically."
+  },
+  {
+   "fieldname": "agents",
+   "fieldtype": "Table",
+   "label": "Agents",
+   "options": "NexChat Session Agent"
   }
  ],
  "links": [],
- "modified": "2026-06-12 10:00:00.000000",
+ "modified": "2026-06-12 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "NexChat",
  "name": "NexChat Session",
