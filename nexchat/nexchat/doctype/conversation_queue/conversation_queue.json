@@ -1,0 +1,220 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-08-05 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "channel",
+  "source_doctype",
+  "source_name",
+  "display_name",
+  "queue_column_a",
+  "status",
+  "sla_state",
+  "crm_section",
+  "contact",
+  "customer",
+  "crm_column",
+  "lead",
+  "assignment_section",
+  "assigned_agent",
+  "assign_column",
+  "last_agent",
+  "activity_section",
+  "last_incoming_at",
+  "last_outgoing_at",
+  "activity_column",
+  "unread_count",
+  "last_message_preview"
+ ],
+ "fields": [
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Channel",
+   "options": "WhatsApp\nWebsite",
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_doctype",
+   "fieldtype": "Link",
+   "label": "Source Doctype",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1,
+   "description": "e.g. WA Conversation, Web Conversation"
+  },
+  {
+   "fieldname": "source_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Source Record",
+   "options": "source_doctype",
+   "read_only": 1,
+   "reqd": 1,
+   "description": "Opens the real conversation record for this channel"
+  },
+  {
+   "fieldname": "display_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Display Name"
+  },
+  {
+   "fieldname": "queue_column_a",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nResolved"
+  },
+  {
+   "default": "OK",
+   "fieldname": "sla_state",
+   "fieldtype": "Select",
+   "label": "SLA State",
+   "options": "OK\nReminded\nEscalated",
+   "read_only": 1
+  },
+  {
+   "fieldname": "crm_section",
+   "fieldtype": "Section Break",
+   "label": "CRM Links"
+  },
+  {
+   "fieldname": "contact",
+   "fieldtype": "Link",
+   "label": "Contact",
+   "options": "Contact"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "crm_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "lead",
+   "fieldtype": "Link",
+   "label": "Lead",
+   "options": "Lead"
+  },
+  {
+   "fieldname": "assignment_section",
+   "fieldtype": "Section Break",
+   "label": "Assignment"
+  },
+  {
+   "fieldname": "assigned_agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Assigned Agent",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "assign_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_agent",
+   "fieldtype": "Link",
+   "label": "Last Agent",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "activity_section",
+   "fieldtype": "Section Break",
+   "label": "Activity"
+  },
+  {
+   "fieldname": "last_incoming_at",
+   "fieldtype": "Datetime",
+   "label": "Last Incoming At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_outgoing_at",
+   "fieldtype": "Datetime",
+   "label": "Last Outgoing At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "activity_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "unread_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Unread Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_message_preview",
+   "fieldtype": "Small Text",
+   "label": "Last Message Preview",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-08-05 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "NexChat",
+ "name": "Conversation Queue",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "NexChat Agent",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "NexChat Supervisor",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "search_fields": "display_name,customer",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "display_name",
+ "track_changes": 0
+}

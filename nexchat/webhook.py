@@ -17,6 +17,8 @@ from datetime import datetime
 
 import frappe
 
+from nexchat.locks import sync_conversation
+
 ACK_MAP = {
 	-1: "Failed",
 	0: "Pending",
@@ -184,6 +186,7 @@ def _handle_message(event_type, data):
 	else:
 		updates["last_outgoing_at"] = timestamp
 	conversation.db_set(updates, update_modified=True)
+	sync_conversation("WA Conversation", conversation.name)
 
 	frappe.publish_realtime(
 		"nexchat_message",

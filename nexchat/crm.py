@@ -20,6 +20,7 @@ import requests
 import frappe
 
 from nexchat.api import _gateway, normalize_number
+from nexchat.locks import sync_conversation as _sync_queue
 
 
 def _digits(value):
@@ -150,6 +151,7 @@ def try_auto_link(conversation_name):
 
 	if updates:
 		conv.db_set(updates, update_modified=False)
+		_sync_queue("WA Conversation", conv.name)
 		frappe.publish_realtime(
 			"nexchat_message",
 			{"conversation": conv.name, "direction": "Meta", "preview": ""},
@@ -187,6 +189,7 @@ def link_conversation(conversation, doctype, docname):
 		if customer and not conv.customer:
 			updates["customer"] = customer
 	conv.db_set(updates, update_modified=False)
+	_sync_queue("WA Conversation", conv.name)
 	return updates
 
 
@@ -200,6 +203,7 @@ def unlink_conversation(conversation):
 		{"customer": None, "contact": None, "lead": None},
 		update_modified=False,
 	)
+	_sync_queue("WA Conversation", conversation)
 	return True
 
 
