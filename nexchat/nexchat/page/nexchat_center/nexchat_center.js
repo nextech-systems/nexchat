@@ -283,7 +283,7 @@ class NexChatCenter {
 				<button class="btn btn-default btn-xs nxc-link">${__("Link")}</button>
 				<button class="btn btn-default btn-xs nxc-lead">${__("Create Lead")}</button>
 			`);
-			this.$cust.find(".nxc-link").on("click", () => frappe.set_route("List", "WA Conversation"));
+			this.$cust.find(".nxc-link").on("click", () => this.open_link_dialog(s));
 			this.$cust.find(".nxc-lead").on("click", () => this.create_lead(s));
 			return;
 		}
@@ -317,15 +317,119 @@ class NexChatCenter {
 		});
 	}
 
+	open_link_dialog(s) {
+		if (!this.active) return;
+		const conv = this.active.name;
+		const esc = frappe.utils.escape_html;
+		frappe.call({
+			method: "nexchat.crm.get_link_options",
+			args: { conversation: conv },
+			callback: (r) => {
+				const m = r.message || {};
+				const contacts = m.contacts || [];
+				const leads = m.leads || [];
+				const customers = m.customers || [];
+				let rows = "";
+				if (customers.length) {
+					rows += '<h6 style="margin:10px 0 4px;font-size:11px;color:var(--text-muted);text-transform:uppercase;">Customers</h6>';
+					customers.forEach(c => {
+						rows += '<div class="nxc-lr" data-doctype="Customer" data-name="' + esc(c.name) + '" style="padding:6px 10px;cursor:pointer;border-radius:6px;border:1px solid var(--border-color);margin-bottom:4px;font-size:13px;"><b>' + esc(c.customer_name || c.name) + '</b><br><span style="font-size:11px;color:var(--text-muted)">' + esc(c.mobile_no || "") + '</span></div>';
+					});
+				}
+				if (contacts.length) {
+					rows += '<h6 style="margin:10px 0 4px;font-size:11px;color:var(--text-muted);text-transform:uppercase;">Contacts</h6>';
+					contacts.forEach(c => {
+						const nm = [c.first_name, c.last_name].filter(Boolean).join(" ") || c.name;
+						rows += '<div class="nxc-lr" data-doctype="Contact" data-name="' + esc(c.name) + '" style="padding:6px 10px;cursor:pointer;border-radius:6px;border:1px solid var(--border-color);margin-bottom:4px;font-size:13px;"><b>' + esc(nm) + '</b><br><span style="font-size:11px;color:var(--text-muted)">' + esc(c.mobile_no || c.phone || "") + '</span></div>';
+					});
+				}
+				if (leads.length) {
+					rows += '<h6 style="margin:10px 0 4px;font-size:11px;color:var(--text-muted);text-transform:uppercase;">Leads</h6>';
+					leads.forEach(c => {
+						rows += '<div class="nxc-lr" data-doctype="Lead" data-name="' + esc(c.name) + '" style="padding:6px 10px;cursor:pointer;border-radius:6px;border:1px solid var(--border-color);margin-bottom:4px;font-size:13px;"><b>' + esc(c.lead_name || c.name) + '</b><br><span style="font-size:11px;color:var(--text-muted)">' + esc(c.mobile_no || c.phone || "") + '</span></div>';
+					});
+				}
+				if (!rows) rows = '<div style="color:var(--text-muted);font-size:13px;padding:10px 0">No matches found. Search below or create a lead.</div>';
+				const search_html = '<div style="margin-top:12px;border-top:1px solid var(--border-color);padding-top:10px"><h6 style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px;">Search manually</h6><div style="display:flex;gap:6px;margin-bottom:6px;"><select class="form-control nxc-link-dt" style="width:120px;height:30px;font-size:12px;"><option value="Customer">Customer</option><option value="Lead">Lead</option><option value="Contact">Contact</option></select><input class="form-control nxc-link-search" placeholder="Type to search..." style="height:30px;font-size:12px;"></div><div class="nxc-link-results"></div></div>';
+				const d = new frappe.ui.Dialog({
+					title: __("Link Conversation"),
+					fields: [{ fieldtype: "HTML", fieldname: "body" }],
+					primary_action_label: __("Close"),
+					primary_action: () => d.hide(),
+				});
+				d.fields_dict.body.$wrapper.html('<div style="max-height:420px;overflow-y:auto;">' + rows + search_html + '</div>');
+				d.show();
+				const do_link = (doctype, name) => {
+					frappe.call({
+						method: "nexchat.crm.link_conversation",
+						args: { conversation: conv, doctype: doctype, docname: name },
+						callback: () => {
+							frappe.show_alert({ message: __("Linked to {0}: {1}", [doctype, name]), indicator: "green" });
+							d.hide();
+							this.load_customer(this.active);
+							this.load_conversations();
+						},
+					});
+				};
+				d.$wrapper.find(".nxc-lr").on("click", function() {
+					do_link($(this).data("doctype"), $(this).data("name"));
+				}).on("mouseenter", function() {
+					$(this).css("background", "var(--bg-color)");
+				}).on("mouseleave", function() {
+					$(this).css("background", "");
+				});
+				let st = null;
+				d.$wrapper.find(".nxc-link-search").on("input", function() {
+					clearTimeout(st);
+					const q = $(this).val().trim();
+					const dt = d.$wrapper.find(".nxc-link-dt").val();
+					if (!q) { d.$wrapper.find(".nxc-link-results").empty(); return; }
+					st = setTimeout(() => {
+						frappe.call({
+							method: "frappe.client.get_list",
+							args: {
+								doctype: dt,
+								filters: [[ dt, dt === "Contact" ? "full_name" : (dt === "Lead" ? "lead_name" : "customer_name"), "like", "%" + q + "%" ]],
+								fields: ["name", dt === "Contact" ? "full_name" : (dt === "Lead" ? "lead_name" : "customer_name")],
+								limit: 6
+							},
+							callback: (r2) => {
+								const res = r2.message || [];
+								const $r = d.$wrapper.find(".nxc-link-results");
+								$r.empty();
+								if (!res.length) { $r.html('<div style="font-size:12px;color:var(--text-muted);padding:4px 0">No results</div>'); return; }
+								res.forEach(item => {
+									const label = item.full_name || item.lead_name || item.customer_name || item.name;
+									$('<div style="padding:5px 8px;cursor:pointer;border-radius:4px;font-size:13px;border:1px solid var(--border-color);margin-bottom:3px;">' + esc(label) + '</div>')
+										.on("click", () => do_link(dt, item.name))
+										.on("mouseenter", function() { $(this).css("background","var(--bg-color)"); })
+										.on("mouseleave", function() { $(this).css("background",""); })
+										.appendTo($r);
+								});
+							},
+						});
+					}, 300);
+				});
+			},
+		});
+	}
+
 	create_lead(s) {
-		frappe.prompt(
-			{ fieldname: "lead_name", fieldtype: "Data", label: __("Lead Name"), default: s.display_name || "", reqd: 1 },
-			(v) => frappe.call({
-				method: "nexchat.crm.create_lead",
-				args: { conversation: this.active.name, lead_name: v.lead_name },
-				callback: (r) => { frappe.show_alert({ message: __("Lead {0} created", [r.message]), indicator: "green" }); this.load_customer(this.active); },
-			}),
-			__("Create Lead")
-		);
+		if (!this.active) return;
+		const conv = this.active.name;
+		const display = s.display_name || s.resolved_number || "";
+		const phone = s.resolved_number || "";
+		frappe.new_doc("Lead").then(() => {
+			setTimeout(() => {
+				const f = cur_frm;
+				if (!f || f.doctype !== "Lead") return;
+				if (display) f.set_value("lead_name", display);
+				if (phone) f.set_value("mobile_no", phone);
+				// Link back to conversation after save
+				f.doc.__nexchat_conv = conv;
+				const orig_save = f.save_or_update ? f.save_or_update.bind(f) : null;
+				frappe.after_ajax(() => {});
+			}, 600);
+		});
 	}
 }
