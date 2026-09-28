@@ -1,0 +1,611 @@
+diff -ruN a/locks.py b/locks.py
+--- a/locks.py	2026-08-05 23:14:24.133811011 +0000
++++ b/locks.py	2026-08-05 23:14:24.153930937 +0000
+@@ -26,6 +26,7 @@
+ # conversation doctype is ready to share this locking/SLA machinery.
+ CHANNEL_DOCTYPES = {
+ 	"WA Conversation": "WhatsApp",
++	"Web Conversation": "Website",
+ }
+ 
+ 
+diff -ruN a/nexchat/doctype/web_chat_message/web_chat_message.json b/nexchat/doctype/web_chat_message/web_chat_message.json
+--- a/nexchat/doctype/web_chat_message/web_chat_message.json	1970-01-01 00:00:00.000000000 +0000
++++ b/nexchat/doctype/web_chat_message/web_chat_message.json	2026-08-05 23:14:24.164790968 +0000
+@@ -0,0 +1,116 @@
++{
++ "actions": [],
++ "autoname": "hash",
++ "creation": "2026-08-05 12:00:00.000000",
++ "doctype": "DocType",
++ "editable_grid": 1,
++ "engine": "InnoDB",
++ "field_order": [
++  "conversation",
++  "direction",
++  "content_type",
++  "msg_column_a",
++  "timestamp",
++  "sent_by",
++  "content_section",
++  "message",
++  "media_file"
++ ],
++ "fields": [
++  {
++   "fieldname": "conversation",
++   "fieldtype": "Link",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Conversation",
++   "options": "Web Conversation",
++   "reqd": 1,
++   "search_index": 1
++  },
++  {
++   "fieldname": "direction",
++   "fieldtype": "Select",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Direction",
++   "options": "Incoming\nOutgoing",
++   "reqd": 1
++  },
++  {
++   "default": "text",
++   "fieldname": "content_type",
++   "fieldtype": "Select",
++   "label": "Content Type",
++   "options": "text\nimage\nfile\nother"
++  },
++  {
++   "fieldname": "msg_column_a",
++   "fieldtype": "Column Break"
++  },
++  {
++   "fieldname": "timestamp",
++   "fieldtype": "Datetime",
++   "in_list_view": 1,
++   "label": "Timestamp",
++   "reqd": 1,
++   "search_index": 1
++  },
++  {
++   "fieldname": "sent_by",
++   "fieldtype": "Link",
++   "label": "Sent By",
++   "options": "User",
++   "description": "ERPNext user who sent this outgoing message"
++  },
++  {
++   "fieldname": "content_section",
++   "fieldtype": "Section Break",
++   "label": "Content"
++  },
++  {
++   "fieldname": "message",
++   "fieldtype": "Long Text",
++   "in_list_view": 1,
++   "label": "Message"
++  },
++  {
++   "fieldname": "media_file",
++   "fieldtype": "Attach",
++   "label": "Media File"
++  }
++ ],
++ "links": [],
++ "modified": "2026-08-05 12:00:00.000000",
++ "modified_by": "Administrator",
++ "module": "NexChat",
++ "name": "Web Chat Message",
++ "owner": "Administrator",
++ "permissions": [
++  {
++   "create": 1,
++   "delete": 1,
++   "email": 1,
++   "export": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "System Manager",
++   "share": 1,
++   "write": 1
++  },
++  {
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Agent"
++  },
++  {
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Supervisor"
++  }
++ ],
++ "sort_field": "timestamp",
++ "sort_order": "DESC",
++ "states": [],
++ "track_changes": 0
++}
+diff -ruN a/nexchat/doctype/web_chat_message/web_chat_message.py b/nexchat/doctype/web_chat_message/web_chat_message.py
+--- a/nexchat/doctype/web_chat_message/web_chat_message.py	1970-01-01 00:00:00.000000000 +0000
++++ b/nexchat/doctype/web_chat_message/web_chat_message.py	2026-08-05 23:14:24.164805395 +0000
+@@ -0,0 +1,8 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++from frappe.model.document import Document
++
++
++class WebChatMessage(Document):
++	pass
+diff -ruN a/nexchat/doctype/web_conversation/web_conversation.json b/nexchat/doctype/web_conversation/web_conversation.json
+--- a/nexchat/doctype/web_conversation/web_conversation.json	1970-01-01 00:00:00.000000000 +0000
++++ b/nexchat/doctype/web_conversation/web_conversation.json	2026-08-05 23:14:24.164715332 +0000
+@@ -0,0 +1,231 @@
++{
++ "actions": [],
++ "autoname": "field:visitor_id",
++ "creation": "2026-08-05 12:00:00.000000",
++ "doctype": "DocType",
++ "editable_grid": 1,
++ "engine": "InnoDB",
++ "field_order": [
++  "visitor_id",
++  "display_name",
++  "email",
++  "page_url",
++  "conv_column_a",
++  "status",
++  "sla_state",
++  "crm_section",
++  "contact",
++  "customer",
++  "crm_column",
++  "lead",
++  "assignment_section",
++  "assigned_agent",
++  "assign_column",
++  "claimed_at",
++  "last_agent",
++  "reminded_at",
++  "activity_section",
++  "last_incoming_at",
++  "last_outgoing_at",
++  "activity_column",
++  "unread_count",
++  "last_message_preview"
++ ],
++ "fields": [
++  {
++   "fieldname": "visitor_id",
++   "fieldtype": "Data",
++   "in_standard_filter": 1,
++   "label": "Visitor ID",
++   "reqd": 1,
++   "unique": 1,
++   "description": "Opaque ID from the website widget's visitor cookie, not a phone number or PII"
++  },
++  {
++   "fieldname": "display_name",
++   "fieldtype": "Data",
++   "in_list_view": 1,
++   "label": "Display Name",
++   "description": "Set if the visitor gives a name in the widget"
++  },
++  {
++   "fieldname": "email",
++   "fieldtype": "Data",
++   "label": "Email",
++   "options": "Email",
++   "in_standard_filter": 1,
++   "description": "Set if the visitor gives an email in the widget - primary CRM matching key for this channel"
++  },
++  {
++   "fieldname": "page_url",
++   "fieldtype": "Data",
++   "label": "Started On Page",
++   "read_only": 1
++  },
++  {
++   "fieldname": "conv_column_a",
++   "fieldtype": "Column Break"
++  },
++  {
++   "default": "Open",
++   "fieldname": "status",
++   "fieldtype": "Select",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Status",
++   "options": "Open\nResolved"
++  },
++  {
++   "default": "OK",
++   "fieldname": "sla_state",
++   "fieldtype": "Select",
++   "label": "SLA State",
++   "options": "OK\nReminded\nEscalated",
++   "read_only": 1
++  },
++  {
++   "fieldname": "crm_section",
++   "fieldtype": "Section Break",
++   "label": "CRM Links"
++  },
++  {
++   "fieldname": "contact",
++   "fieldtype": "Link",
++   "label": "Contact",
++   "options": "Contact"
++  },
++  {
++   "fieldname": "customer",
++   "fieldtype": "Link",
++   "in_standard_filter": 1,
++   "label": "Customer",
++   "options": "Customer"
++  },
++  {
++   "fieldname": "crm_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "fieldname": "lead",
++   "fieldtype": "Link",
++   "label": "Lead",
++   "options": "Lead"
++  },
++  {
++   "fieldname": "assignment_section",
++   "fieldtype": "Section Break",
++   "label": "Assignment"
++  },
++  {
++   "fieldname": "assigned_agent",
++   "fieldtype": "Link",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Assigned Agent",
++   "options": "User"
++  },
++  {
++   "fieldname": "assign_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "fieldname": "claimed_at",
++   "fieldtype": "Datetime",
++   "label": "Claimed At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_agent",
++   "fieldtype": "Link",
++   "label": "Last Agent",
++   "options": "User",
++   "read_only": 1,
++   "description": "Most recent agent to handle this conversation; persists across release for sticky routing"
++  },
++  {
++   "fieldname": "reminded_at",
++   "fieldtype": "Datetime",
++   "label": "Reminded At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "activity_section",
++   "fieldtype": "Section Break",
++   "label": "Activity"
++  },
++  {
++   "fieldname": "last_incoming_at",
++   "fieldtype": "Datetime",
++   "label": "Last Incoming At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_outgoing_at",
++   "fieldtype": "Datetime",
++   "label": "Last Outgoing At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "activity_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "default": "0",
++   "fieldname": "unread_count",
++   "fieldtype": "Int",
++   "in_list_view": 1,
++   "label": "Unread Count",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_message_preview",
++   "fieldtype": "Small Text",
++   "label": "Last Message Preview",
++   "read_only": 1
++  }
++ ],
++ "links": [],
++ "modified": "2026-08-05 12:00:00.000000",
++ "modified_by": "Administrator",
++ "module": "NexChat",
++ "name": "Web Conversation",
++ "owner": "Administrator",
++ "permissions": [
++  {
++   "create": 1,
++   "delete": 1,
++   "email": 1,
++   "export": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "System Manager",
++   "share": 1,
++   "write": 1
++  },
++  {
++   "email": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Agent",
++   "share": 1,
++   "write": 1
++  },
++  {
++   "email": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Supervisor",
++   "share": 1,
++   "write": 1
++  }
++ ],
++ "search_fields": "visitor_id,display_name,email,customer",
++ "sort_field": "modified",
++ "sort_order": "DESC",
++ "states": [],
++ "title_field": "display_name",
++ "track_changes": 1
++}
+diff -ruN a/nexchat/doctype/web_conversation/web_conversation.py b/nexchat/doctype/web_conversation/web_conversation.py
+--- a/nexchat/doctype/web_conversation/web_conversation.py	1970-01-01 00:00:00.000000000 +0000
++++ b/nexchat/doctype/web_conversation/web_conversation.py	2026-08-05 23:14:24.164732485 +0000
+@@ -0,0 +1,8 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++from frappe.model.document import Document
++
++
++class WebConversation(Document):
++	pass
+diff -ruN a/website.py b/website.py
+--- a/website.py	1970-01-01 00:00:00.000000000 +0000
++++ b/website.py	2026-08-05 23:14:24.152705969 +0000
+@@ -0,0 +1,217 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++"""Website chat channel.
++
++Security model: visitor_id is a server-minted random token (not a phone
++number, not client-chosen), returned once from start_conversation() and
++then stored by the widget (cookie/localStorage) and sent back as a bearer
++token on every subsequent call. Guessing one is infeasible (128 bits), but
++anyone holding the token can read/write that conversation - same trust
++model as a session cookie. Never accept a client-supplied visitor_id for
++conversation creation; only ever look one up, never mint it from input.
++
++Everything else deliberately mirrors webhook.py's WhatsApp flow so the
++same locks.py / Conversation Queue machinery applies unchanged:
++Web Conversation and Web Chat Message use the same field names as their
++WA_* counterparts.
++"""
++
++import frappe
++from frappe.utils import now_datetime
++
++from nexchat.locks import sync_conversation, claim_on_reply
++
++DOCTYPE = "Web Conversation"
++MAX_MESSAGE_LEN = 4096
++
++# guest abuse protection: simple per-visitor rate limit, mirrors the
++# per_minute pattern already used for outbound WhatsApp sends in api.py
++RATE_LIMIT_PER_MINUTE = 20
++
++
++@frappe.whitelist(allow_guest=True, methods=["POST"])
++def start_conversation(page_url=None):
++	"""Mint a new visitor_id and Web Conversation. Call this once per
++	visitor (widget checks its cookie first and only calls this if empty)."""
++	visitor_id = frappe.generate_hash(length=32)
++	frappe.get_doc(
++		{
++			"doctype": DOCTYPE,
++			"visitor_id": visitor_id,
++			"page_url": (page_url or "")[:255],
++			"status": "Open",
++		}
++	).insert(ignore_permissions=True)
++	sync_conversation(DOCTYPE, visitor_id)
++	return {"visitor_id": visitor_id}
++
++
++@frappe.whitelist(allow_guest=True, methods=["POST"])
++def identify(visitor_id, display_name=None, email=None):
++	"""Optional: widget calls this if the visitor gives a name/email
++	(e.g. a pre-chat form). Not required to start chatting."""
++	conv = _get_conversation(visitor_id)
++	updates = {}
++	if display_name:
++		updates["display_name"] = display_name[:140]
++	if email:
++		updates["email"] = email[:140]
++	if updates:
++		conv.db_set(updates, update_modified=False)
++		sync_conversation(DOCTYPE, conv.name)
++	return {"ok": True}
++
++
++@frappe.whitelist(allow_guest=True, methods=["POST"])
++def send_from_widget(visitor_id, message, page_url=None):
++	"""Visitor sends a message. Guest-callable - visitor_id is the bearer
++	token, message is free text from an anonymous source, so treat both
++	as untrusted input."""
++	conv = _get_conversation(visitor_id)
++	message = (message or "").strip()
++	if not message:
++		frappe.throw("Message is empty")
++	if len(message) > MAX_MESSAGE_LEN:
++		frappe.throw(f"Message exceeds {MAX_MESSAGE_LEN} characters")
++
++	_enforce_rate_limit(visitor_id)
++
++	now = now_datetime()
++	msg = frappe.get_doc(
++		{
++			"doctype": "Web Chat Message",
++			"conversation": conv.name,
++			"direction": "Incoming",
++			"content_type": "text",
++			"message": message,
++			"timestamp": now,
++		}
++	).insert(ignore_permissions=True)
++
++	updates = {
++		"last_message_preview": message[:140],
++		"last_incoming_at": now,
++		"unread_count": (conv.unread_count or 0) + 1,
++		"status": "Open",
++	}
++	if page_url:
++		updates.setdefault("page_url", conv.page_url or page_url[:255])
++	conv.db_set(updates, update_modified=True)
++	sync_conversation(DOCTYPE, conv.name)
++
++	frappe.publish_realtime(
++		"nexchat_message",
++		{
++			"conversation": conv.name,
++			"source_doctype": DOCTYPE,
++			"message": msg.name,
++			"direction": "Incoming",
++			"preview": updates["last_message_preview"],
++			"display_name": conv.display_name or "Website visitor",
++		},
++		after_commit=True,
++	)
++	return {"ok": True, "message": msg.name}
++
++
++@frappe.whitelist(allow_guest=True)
++def poll_messages(visitor_id, after=None):
++	"""Widget polls this every few seconds for new messages (including
++	agent replies). Simpler and more robust than guest realtime/socketio
++	for a first version - revisit if polling load becomes a problem."""
++	conv = _get_conversation(visitor_id)
++	filters = {"conversation": conv.name}
++	if after:
++		# after = name of the last message the widget already has
++		last_seen = frappe.db.get_value("Web Chat Message", after, "timestamp")
++		if last_seen:
++			filters["timestamp"] = (">", last_seen)
++
++	messages = frappe.get_all(
++		"Web Chat Message",
++		filters=filters,
++		fields=["name", "direction", "content_type", "message", "timestamp"],
++		order_by="timestamp asc",
++		limit_page_length=50,
++	)
++	return {"messages": messages, "status": conv.status}
++
++
++@frappe.whitelist()
++def send_reply(conversation, message):
++	"""Agent reply from NexChat Center. Same shape as WA's send_message in
++	api.py, minus the gateway call - there's no external transport here,
++	the message just lands in Web Chat Message and the widget picks it up
++	on its next poll."""
++	if not frappe.has_permission(DOCTYPE, "write"):
++		frappe.throw("Not permitted", frappe.PermissionError)
++	message = (message or "").strip()
++	if not message:
++		frappe.throw("Message is empty")
++	if len(message) > MAX_MESSAGE_LEN:
++		frappe.throw(f"Message exceeds {MAX_MESSAGE_LEN} characters")
++
++	conv = frappe.get_doc(DOCTYPE, conversation)
++	claim_on_reply(conv.name, frappe.session.user, doctype=DOCTYPE)
++
++	now = now_datetime()
++	msg = frappe.get_doc(
++		{
++			"doctype": "Web Chat Message",
++			"conversation": conv.name,
++			"direction": "Outgoing",
++			"content_type": "text",
++			"message": message,
++			"timestamp": now,
++			"sent_by": frappe.session.user,
++		}
++	).insert(ignore_permissions=True)
++
++	conv.db_set({"last_message_preview": message[:140], "last_outgoing_at": now}, update_modified=True)
++	sync_conversation(DOCTYPE, conv.name)
++
++	frappe.publish_realtime(
++		"nexchat_message",
++		{
++			"conversation": conv.name,
++			"source_doctype": DOCTYPE,
++			"message": msg.name,
++			"direction": "Outgoing",
++			"preview": message[:140],
++			"display_name": conv.display_name or "Website visitor",
++		},
++		after_commit=True,
++	)
++	return msg.name
++
++
++@frappe.whitelist()
++def mark_read(conversation):
++	if not frappe.has_permission(DOCTYPE, "write"):
++		frappe.throw("Not permitted", frappe.PermissionError)
++	frappe.db.set_value(DOCTYPE, conversation, "unread_count", 0, update_modified=False)
++	sync_conversation(DOCTYPE, conversation)
++	return True
++
++
++def _get_conversation(visitor_id):
++	"""Look up an existing conversation only - never create one from a
++	client-supplied visitor_id. If this throws, the widget's stored token
++	is stale/invalid and it should call start_conversation() again."""
++	if not visitor_id or not frappe.db.exists(DOCTYPE, visitor_id):
++		frappe.throw("Unknown conversation", frappe.DoesNotExistError)
++	return frappe.get_doc(DOCTYPE, visitor_id)
++
++
++def _enforce_rate_limit(visitor_id):
++	count = frappe.db.count(
++		"Web Chat Message",
++		filters={
++			"conversation": visitor_id,
++			"direction": "Incoming",
++			"timestamp": (">", frappe.utils.add_to_date(now_datetime(), minutes=-1)),
++		},
++	)
++	if count >= RATE_LIMIT_PER_MINUTE:
++		frappe.throw("You're sending messages too quickly - please wait a moment.")

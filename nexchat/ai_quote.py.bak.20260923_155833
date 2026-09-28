@@ -1,0 +1,250 @@
+import json
+
+import frappe
+from frappe import _
+
+
+ALLOWED_ROLE = "Voice Agent API"
+
+COMPANY = "Matthews And Clarke Ltd"
+PRICE_LIST = "STANDARD SELLING"
+CURRENCY = "JMD"
+TAXES_TEMPLATE = "Jamaica Tax - MACL"
+
+
+def _require_voice_agent_role():
+    roles = frappe.get_roles(frappe.session.user)
+
+    if ALLOWED_ROLE not in roles and "System Manager" not in roles:
+        frappe.throw(
+            _("Not permitted to create AI quotations."),
+            frappe.PermissionError,
+        )
+
+
+def _parse_payload(payload):
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    if not isinstance(payload, dict):
+        frappe.throw(
+            _("Invalid quotation payload."),
+            frappe.ValidationError,
+        )
+
+    return payload
+
+
+def _validate_customer(customer):
+    if not customer:
+        frappe.throw(
+            _("Customer is required."),
+            frappe.ValidationError,
+        )
+
+    if not frappe.db.exists("Customer", customer):
+        frappe.throw(
+            _("Customer {0} does not exist.").format(
+                frappe.bold(customer)
+            ),
+            frappe.ValidationError,
+        )
+
+    disabled = frappe.db.get_value(
+        "Customer",
+        customer,
+        "disabled",
+    )
+
+    if disabled:
+        frappe.throw(
+            _("Customer {0} is disabled.").format(
+                frappe.bold(customer)
+            ),
+            frappe.ValidationError,
+        )
+
+
+def _validate_items(items):
+    if not isinstance(items, list) or not items:
+        frappe.throw(
+            _("At least one quotation item is required."),
+            frappe.ValidationError,
+        )
+
+    validated = []
+
+    for index, row in enumerate(items, start=1):
+        item_code = (row.get("item_code") or "").strip()
+        qty = row.get("qty")
+        uom = (row.get("uom") or "").strip()
+
+        if not item_code:
+            frappe.throw(
+                _("Item code missing on line {0}.").format(index),
+                frappe.ValidationError,
+            )
+
+        if not frappe.db.exists("Item", item_code):
+            frappe.throw(
+                _("Item {0} does not exist.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        disabled = frappe.db.get_value(
+            "Item",
+            item_code,
+            "disabled",
+        )
+
+        if disabled:
+            frappe.throw(
+                _("Item {0} is disabled.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            frappe.throw(
+                _("Invalid quantity for item {0}.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        if qty <= 0:
+            frappe.throw(
+                _("Quantity must be greater than zero for item {0}.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        if not uom:
+            uom = frappe.db.get_value(
+                "Item",
+                item_code,
+                "stock_uom",
+            )
+
+        validated.append(
+            {
+                "item_code": item_code,
+                "qty": qty,
+                "uom": uom,
+            }
+        )
+
+    return validated
+
+
+@frappe.whitelist()
+def create_draft_quotation(payload=None):
+    """
+    Create a Draft ERPNext Quotation from a confirmed AI request.
+
+    This endpoint NEVER submits the Quotation.
+    """
+
+    _require_voice_agent_role()
+
+    payload = _parse_payload(payload)
+
+    if payload.get("ready_for_quotation") is not True:
+        frappe.throw(
+            _("Request is not marked ready for quotation."),
+            frappe.ValidationError,
+        )
+
+    if payload.get("erpnext_confirmed") is not True:
+        frappe.throw(
+            _("ERPNext-resolved request was not confirmed."),
+            frappe.ValidationError,
+        )
+
+    if payload.get("ready_to_create_draft") is not True:
+        frappe.throw(
+            _("Request is not approved for draft creation."),
+            frappe.ValidationError,
+        )
+
+    customer = (
+        payload.get("customer")
+        or {}
+    ).get("name")
+
+    _validate_customer(customer)
+
+    incoming_items = payload.get("items") or []
+
+    quotation_items = []
+
+    for row in incoming_items:
+        quotation_items.append(
+            {
+                "item_code": row.get("item_code"),
+                "qty": row.get("qty"),
+                "uom": row.get("stock_uom") or row.get("uom"),
+            }
+        )
+
+    quotation_items = _validate_items(
+        quotation_items
+    )
+
+    doc = frappe.get_doc(
+        {
+            "doctype": "Quotation",
+            "quotation_to": "Customer",
+            "party_name": customer,
+            "company": COMPANY,
+            "selling_price_list": PRICE_LIST,
+            "currency": CURRENCY,
+            "taxes_and_charges": TAXES_TEMPLATE,
+            "items": quotation_items,
+            "docstatus": 0,
+        }
+    )
+
+    # Let ERPNext populate its normal customer/item/pricing/default values.
+    doc.set_missing_values()
+
+    # Hard safety boundary: this integration creates Drafts only.
+    doc.docstatus = 0
+
+    doc.insert()
+
+    doc.reload()
+
+    return {
+        "ok": True,
+        "name": doc.name,
+        "docstatus": doc.docstatus,
+        "customer": doc.party_name,
+        "company": doc.company,
+        "selling_price_list": doc.selling_price_list,
+        "currency": doc.currency,
+        "taxes_and_charges": doc.taxes_and_charges,
+        "net_total": doc.net_total,
+        "total_taxes_and_charges": doc.total_taxes_and_charges,
+        "grand_total": doc.grand_total,
+        "items": [
+            {
+                "item_code": row.item_code,
+                "item_name": row.item_name,
+                "qty": row.qty,
+                "uom": row.uom,
+                "stock_uom": row.stock_uom,
+                "rate": row.rate,
+                "price_list_rate": row.price_list_rate,
+                "amount": row.amount,
+                "warehouse": row.warehouse,
+            }
+            for row in doc.items
+        ],
+    }

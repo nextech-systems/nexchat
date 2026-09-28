@@ -1,0 +1,417 @@
+import json
+
+import frappe
+from frappe import _
+
+from nexchat.sales_rep import resolve_sales_rep
+
+
+ALLOWED_ROLE = "Voice Agent API"
+
+COMPANY = "Matthews And Clarke Ltd"
+PRICE_LIST = "STANDARD SELLING"
+CURRENCY = "JMD"
+TAXES_TEMPLATE = "Jamaica Tax - MACL"
+
+
+def _require_voice_agent_role():
+    roles = frappe.get_roles(frappe.session.user)
+
+    if ALLOWED_ROLE not in roles and "System Manager" not in roles:
+        frappe.throw(
+            _("Not permitted to create AI quotations."),
+            frappe.PermissionError,
+        )
+
+
+def _parse_payload(payload):
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    if not isinstance(payload, dict):
+        frappe.throw(
+            _("Invalid quotation payload."),
+            frappe.ValidationError,
+        )
+
+    return payload
+
+
+def _validate_customer(customer):
+    if not customer:
+        frappe.throw(
+            _("Customer is required."),
+            frappe.ValidationError,
+        )
+
+    if not frappe.db.exists("Customer", customer):
+        frappe.throw(
+            _("Customer {0} does not exist.").format(
+                frappe.bold(customer)
+            ),
+            frappe.ValidationError,
+        )
+
+    disabled = frappe.db.get_value(
+        "Customer",
+        customer,
+        "disabled",
+    )
+
+    if disabled:
+        frappe.throw(
+            _("Customer {0} is disabled.").format(
+                frappe.bold(customer)
+            ),
+            frappe.ValidationError,
+        )
+
+
+def _validate_items(items):
+    if not isinstance(items, list) or not items:
+        frappe.throw(
+            _("At least one quotation item is required."),
+            frappe.ValidationError,
+        )
+
+    validated = []
+
+    for index, row in enumerate(items, start=1):
+        item_code = (row.get("item_code") or "").strip()
+        qty = row.get("qty")
+        uom = (row.get("uom") or "").strip()
+
+        if not item_code:
+            frappe.throw(
+                _("Item code missing on line {0}.").format(index),
+                frappe.ValidationError,
+            )
+
+        if not frappe.db.exists("Item", item_code):
+            frappe.throw(
+                _("Item {0} does not exist.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        disabled = frappe.db.get_value(
+            "Item",
+            item_code,
+            "disabled",
+        )
+
+        if disabled:
+            frappe.throw(
+                _("Item {0} is disabled.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            frappe.throw(
+                _("Invalid quantity for item {0}.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        if qty <= 0:
+            frappe.throw(
+                _("Quantity must be greater than zero for item {0}.").format(
+                    frappe.bold(item_code)
+                ),
+                frappe.ValidationError,
+            )
+
+        if not uom:
+            uom = frappe.db.get_value(
+                "Item",
+                item_code,
+                "stock_uom",
+            )
+
+        entry = {
+            "item_code": item_code,
+            "qty": qty,
+            "uom": uom,
+        }
+
+        # Optional note (e.g. a cut list) appended to the item's
+        # standard description. The client cannot replace it.
+        note = (row.get("description_note") or "").strip()
+
+        if note:
+            if len(note) > 500:
+                frappe.throw(
+                    _("Description note too long for item {0}.").format(
+                        frappe.bold(item_code)
+                    ),
+                    frappe.ValidationError,
+                )
+
+            base = (
+                frappe.db.get_value("Item", item_code, "description")
+                or frappe.db.get_value("Item", item_code, "item_name")
+                or item_code
+            )
+
+            entry["description"] = (
+                f"{base}<br>{frappe.utils.escape_html(note)}"
+            )
+
+        validated.append(entry)
+
+    return validated
+
+
+def _resolve_sales_person(rep_code):
+    rep_code = (rep_code or "").strip().upper()
+
+    if not rep_code:
+        frappe.throw(
+            _("Rep Code is required."),
+            frappe.ValidationError,
+        )
+
+    result = resolve_sales_rep(
+        rep_code=rep_code,
+    )
+
+    if not result or result.get("status") != "resolved":
+        frappe.throw(
+            _("No active AI Sales Rep found for Rep Code {0}.").format(
+                frappe.bold(rep_code)
+            ),
+            frappe.ValidationError,
+        )
+
+    sales_rep = result.get("sales_rep") or {}
+    sales_person = sales_rep.get("sales_person")
+
+    if not sales_person:
+        frappe.throw(
+            _("AI Sales Rep {0} has no Sales Person assigned.").format(
+                frappe.bold(rep_code)
+            ),
+            frappe.ValidationError,
+        )
+
+    if not frappe.db.exists("Sales Person", sales_person):
+        frappe.throw(
+            _("Sales Person {0} does not exist.").format(
+                frappe.bold(sales_person)
+            ),
+            frappe.ValidationError,
+        )
+
+    is_group = frappe.db.get_value(
+        "Sales Person",
+        sales_person,
+        "is_group",
+    )
+
+    if is_group:
+        frappe.throw(
+            _("Sales Person {0} is a group and cannot be assigned to this quotation.").format(
+                frappe.bold(sales_person)
+            ),
+            frappe.ValidationError,
+        )
+
+    return {
+        "rep_code": rep_code,
+        "rep_name": sales_rep.get("rep_name"),
+        "sales_person": sales_person,
+    }
+
+
+def _sales_team_from_customer(customer):
+    """
+    The quotation's sales team ALWAYS comes from the Customer record.
+    The rep is never dictated by the requester (phone, WhatsApp, manual).
+    """
+    rows = frappe.get_all(
+        "Sales Team",
+        filters={
+            "parenttype": "Customer",
+            "parent": customer,
+        },
+        fields=["sales_person", "allocated_percentage", "idx"],
+        order_by="idx asc",
+    )
+
+    team = []
+
+    for row in rows:
+        if not row.sales_person:
+            continue
+
+        enabled = frappe.db.get_value(
+            "Sales Person",
+            row.sales_person,
+            "enabled",
+        )
+
+        if not enabled:
+            continue
+
+        team.append({
+            "sales_person": row.sales_person,
+            "allocated_percentage": float(row.allocated_percentage or 0),
+        })
+
+    if not team:
+        frappe.throw(
+            _("Customer {0} has no active sales rep assigned. Please contact the office.").format(
+                frappe.bold(customer)
+            ),
+            frappe.ValidationError,
+        )
+
+    # ERPNext requires the sales team to total 100%.
+    total = sum(r["allocated_percentage"] for r in team)
+
+    if total <= 0:
+        for r in team:
+            r["allocated_percentage"] = 100.0 / len(team)
+    elif abs(total - 100.0) > 0.001:
+        for r in team:
+            r["allocated_percentage"] = r["allocated_percentage"] * 100.0 / total
+
+    for r in team:
+        r["allocated_percentage"] = round(r["allocated_percentage"], 2)
+
+    team[-1]["allocated_percentage"] = round(
+        100.0 - sum(r["allocated_percentage"] for r in team[:-1]),
+        2,
+    )
+
+    return team
+
+
+@frappe.whitelist()
+def create_draft_quotation(payload=None):
+    """
+    Create a Draft ERPNext Quotation from a confirmed AI request.
+
+    This endpoint NEVER submits the Quotation.
+    """
+
+    _require_voice_agent_role()
+
+    payload = _parse_payload(payload)
+
+    if payload.get("ready_for_quotation") is not True:
+        frappe.throw(
+            _("Request is not marked ready for quotation."),
+            frappe.ValidationError,
+        )
+
+    if payload.get("erpnext_confirmed") is not True:
+        frappe.throw(
+            _("ERPNext-resolved request was not confirmed."),
+            frappe.ValidationError,
+        )
+
+    if payload.get("ready_to_create_draft") is not True:
+        frappe.throw(
+            _("Request is not approved for draft creation."),
+            frappe.ValidationError,
+        )
+
+
+    customer = (
+        payload.get("customer")
+        or {}
+    ).get("name")
+
+    _validate_customer(customer)
+
+    # The rep always comes from the customer record.
+    # Any rep_code in the payload is ignored.
+    sales_team = _sales_team_from_customer(customer)
+
+    incoming_items = payload.get("items") or []
+
+    quotation_items = []
+
+    for row in incoming_items:
+        quotation_items.append(
+            {
+                "item_code": row.get("item_code"),
+                "qty": row.get("qty"),
+                "uom": row.get("stock_uom") or row.get("uom"),
+                "description_note": row.get("description_note"),
+            }
+        )
+
+    quotation_items = _validate_items(
+        quotation_items
+    )
+
+    doc = frappe.get_doc(
+        {
+            "doctype": "Quotation",
+            "quotation_to": "Customer",
+            "party_name": customer,
+            "company": COMPANY,
+            "selling_price_list": PRICE_LIST,
+            "currency": CURRENCY,
+            "taxes_and_charges": TAXES_TEMPLATE,
+            "sales_team": sales_team,
+            "items": quotation_items,
+            "docstatus": 0,
+        }
+    )
+
+    # Let ERPNext populate its normal customer/item/pricing/default values.
+    doc.set_missing_values()
+
+    # Hard safety boundary: this integration creates Drafts only.
+    doc.docstatus = 0
+
+    doc.insert()
+
+    doc.reload()
+
+    return {
+        "ok": True,
+        "name": doc.name,
+        "docstatus": doc.docstatus,
+        "customer": doc.party_name,
+        "company": doc.company,
+        "selling_price_list": doc.selling_price_list,
+        "currency": doc.currency,
+        "taxes_and_charges": doc.taxes_and_charges,
+        "rep_code": None,
+        "rep_name": sales_team[0]["sales_person"],
+        "sales_person": sales_team[0]["sales_person"],
+        "net_total": doc.net_total,
+        "total_taxes_and_charges": doc.total_taxes_and_charges,
+        "grand_total": doc.grand_total,
+        "sales_team": [
+            {
+                "sales_person": row.sales_person,
+                "allocated_percentage": row.allocated_percentage,
+            }
+            for row in doc.sales_team
+        ],
+        "items": [
+            {
+                "item_code": row.item_code,
+                "item_name": row.item_name,
+                "qty": row.qty,
+                "uom": row.uom,
+                "stock_uom": row.stock_uom,
+                "rate": row.rate,
+                "price_list_rate": row.price_list_rate,
+                "amount": row.amount,
+                "warehouse": row.warehouse,
+            }
+            for row in doc.items
+        ],
+    }

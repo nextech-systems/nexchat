@@ -172,7 +172,14 @@ class NexChatCenter {
 			const cls = (this.active && this.active.name === c.name) ? "active" : (c.sticky_mine ? "sticky" : "");
 			const name = esc(c.display_name || c.name);
 			const sub = c.customer ? esc(c.customer) : (c.lead ? __("Lead") : (c.sticky_mine ? __("Returning - yours") : __("Unlinked")));
-			const chip = multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "";
+			const CHANNEL_COLORS = {
+				Website: "var(--blue-100,#d8e6fd)",
+				Email: "var(--orange-100,#fde3ce)",
+				WhatsApp: "var(--green-100,#d4f5dd)",
+			};
+			const channel_color = CHANNEL_COLORS[c.channel] || "var(--bg-color)";
+			const channel_chip = ` <span class="nxc-chip" style="background:${channel_color}">${esc(c.channel || "")}</span>`;
+			const chip = (multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "") + channel_chip;
 			const badge = c.unread_count ? `<span class="nxc-badge">${c.unread_count}</span>` : "";
 			const clock = (c.waiting && c.sla_state === "Escalated") ? `<span class="nxc-clock">overdue</span>`
 				: (c.waiting && c.sla_state === "Reminded") ? `<span class="nxc-clock">waiting</span>` : "";
@@ -222,16 +229,21 @@ class NexChatCenter {
 			this.$thread.find(".nxc-send").on("click", () => this.send());
 			this.$input.on("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send(); }});
 		}
-		this.$thread.find(".nxc-release").on("click", () => this.lock_action("release", c.name));
-		this.$thread.find(".nxc-takeover").on("click", () => this.lock_action("take_over", c.name));
+		this.$thread.find(".nxc-release").on("click", () => this.lock_action("release", c.name, c.source_doctype));
+		this.$thread.find(".nxc-takeover").on("click", () => this.lock_action("take_over", c.name, c.source_doctype));
 	}
 
-	lock_action(action, name) {
-		frappe.call({ method: `nexchat.locks.${action}`, args: { conversation: name }, callback: () => this.load_conversations() });
+	lock_action(action, name, source_doctype) {
+		frappe.call({
+			method: `nexchat.locks.${action}`,
+			args: { conversation: name, doctype: source_doctype || "WA Conversation" },
+			callback: () => this.load_conversations(),
+		});
 	}
 
 	load_messages(name) {
-		frappe.call({ method: "nexchat.api.get_messages", args: { conversation: name, limit: 50 }, callback: (r) => {
+		const source_doctype = (this.active && this.active.name === name) ? this.active.source_doctype : "WA Conversation";
+		frappe.call({ method: "nexchat.api.get_messages", args: { conversation: name, source_doctype, limit: 50 }, callback: (r) => {
 			if (!this.active || this.active.name !== name || !this.$msgs) return;
 			const esc = frappe.utils.escape_html;
 			this.$msgs.empty();
@@ -240,7 +252,8 @@ class NexChatCenter {
 				let body = esc(m.message || "");
 				if (!body && m.content_type !== "text") body = `[${esc(m.content_type)}]`;
 				const ack = (m.direction === "Outgoing" && m.ack_status) ? ` · ${esc(m.ack_status)}` : "";
-				this.$msgs.append(`<div class="nxc-bubble ${dir}"><div>${body}</div><div class="nxc-meta">${esc(frappe.datetime.str_to_user(m.timestamp))}${ack}</div></div>`);
+				const bot_tag = m.is_bot_reply ? ` · <span title="Sent automatically by the AI">\u{1F916} AI</span>` : "";
+				this.$msgs.append(`<div class="nxc-bubble ${dir}"><div>${body}</div><div class="nxc-meta">${esc(frappe.datetime.str_to_user(m.timestamp))}${ack}${bot_tag}</div></div>`);
 			});
 			this.$msgs.scrollTop(this.$msgs[0].scrollHeight);
 		}});
@@ -252,8 +265,16 @@ class NexChatCenter {
 		if (!text) return;
 		this.sending = true;
 		const $b = this.$thread.find(".nxc-send").prop("disabled", true);
+		// Each channel has its own send path (WhatsApp goes through the
+		// OpenWA gateway, Website/Email just write their own record) -
+		// same args shape either way, just a different method.
+		const SEND_METHOD = {
+			"Web Conversation": "nexchat.website.send_reply",
+			"Email Conversation": "nexchat.email_channel.send_email_reply",
+		};
+		const method = SEND_METHOD[this.active.source_doctype] || "nexchat.api.send_message";
 		frappe.call({
-			method: "nexchat.api.send_message",
+			method,
 			args: { conversation: this.active.name, message: text },
 			callback: () => { this.$input.val(""); this.load_messages(this.active.name); this.refresh_all(true); },
 			always: () => { this.sending = false; $b.prop("disabled", false); this.$input.focus(); },
@@ -261,11 +282,12 @@ class NexChatCenter {
 	}
 
 	mark_read(name) {
-		frappe.call({ method: "nexchat.api.mark_read", args: { conversation: name }, callback: () => this.refresh_all(true) });
+		const source_doctype = (this.active && this.active.name === name) ? this.active.source_doctype : "WA Conversation";
+		frappe.call({ method: "nexchat.api.mark_read", args: { conversation: name, source_doctype }, callback: () => this.refresh_all(true) });
 	}
 
 	load_customer(c) {
-		frappe.call({ method: "nexchat.api.customer_summary", args: { conversation: c.name }, callback: (r) => {
+		frappe.call({ method: "nexchat.api.customer_summary", args: { conversation: c.name, source_doctype: c.source_doctype }, callback: (r) => {
 			if (!this.active || this.active.name !== c.name) return;
 			this.render_customer(r.message || {});
 		}});

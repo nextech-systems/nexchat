@@ -1,0 +1,170 @@
+import frappe
+from frappe import _
+from frappe.model.document import Document
+
+
+ALLOWED_ROLE = "Voice Agent API"
+
+
+class SalesRequest(Document):
+    def validate(self):
+        if self.rep_code:
+            self.rep_code = self.rep_code.strip().upper()
+
+        if self.status == "Completed" and not self.completed_at:
+            self.completed_at = frappe.utils.now_datetime()
+
+        if self.status != "Completed" and self.completed_at:
+            self.completed_at = None
+
+
+def _require_voice_agent_role():
+    roles = frappe.get_roles(frappe.session.user)
+
+    if ALLOWED_ROLE not in roles and "System Manager" not in roles:
+        frappe.throw(
+            _("Not permitted to create Sales Requests."),
+            frappe.PermissionError,
+        )
+
+
+@frappe.whitelist()
+def create_sales_request(
+    rep_code=None,
+    source="AI Voice",
+    request_text=None,
+):
+    _require_voice_agent_role()
+
+    rep_code = (rep_code or "").strip().upper()
+
+    if not rep_code:
+        frappe.throw(
+            _("Rep Code is required."),
+            frappe.ValidationError,
+        )
+
+    rep = frappe.db.get_value(
+        "AI Sales Rep",
+        {
+            "rep_code": rep_code,
+            "active": 1,
+        },
+        [
+            "rep_name",
+            "sales_person",
+        ],
+        as_dict=True,
+    )
+
+    if not rep:
+        frappe.throw(
+            _("No active AI Sales Rep found for Rep Code {0}.").format(
+                frappe.bold(rep_code)
+            ),
+            frappe.ValidationError,
+        )
+
+    doc = frappe.get_doc({
+        "doctype": "Sales Request",
+        "source": source or "AI Voice",
+        "rep_code": rep_code,
+        "request_text": request_text,
+        "status": "New",
+    })
+
+    doc.insert()
+
+    return {
+        "name": doc.name,
+        "status": doc.status,
+        "source": doc.source,
+        "rep_code": doc.rep_code,
+        "rep_name": doc.rep_name,
+        "sales_person": doc.sales_person,
+        "customer": doc.customer,
+        "quotation": doc.quotation,
+    }
+
+
+@frappe.whitelist()
+def link_draft_quotation(
+    sales_request=None,
+    quotation=None,
+):
+    _require_voice_agent_role()
+
+    if not sales_request:
+        frappe.throw(
+            _("Sales Request is required."),
+            frappe.ValidationError,
+        )
+
+    if not quotation:
+        frappe.throw(
+            _("Quotation is required."),
+            frappe.ValidationError,
+        )
+
+    if not frappe.db.exists(
+        "Sales Request",
+        sales_request,
+    ):
+        frappe.throw(
+            _("Sales Request {0} does not exist.").format(
+                frappe.bold(sales_request)
+            ),
+            frappe.ValidationError,
+        )
+
+    if not frappe.db.exists(
+        "Quotation",
+        quotation,
+    ):
+        frappe.throw(
+            _("Quotation {0} does not exist.").format(
+                frappe.bold(quotation)
+            ),
+            frappe.ValidationError,
+        )
+
+    quotation_docstatus = frappe.db.get_value(
+        "Quotation",
+        quotation,
+        "docstatus",
+    )
+
+    if quotation_docstatus != 0:
+        frappe.throw(
+            _(
+                "Safety stop: only Draft Quotations "
+                "can be linked to AI Sales Requests."
+            ),
+            frappe.ValidationError,
+        )
+
+    quotation_customer = frappe.db.get_value(
+        "Quotation",
+        quotation,
+        "party_name",
+    )
+
+    doc = frappe.get_doc(
+        "Sales Request",
+        sales_request,
+    )
+
+    doc.quotation = quotation
+    doc.customer = quotation_customer
+    doc.status = "Quote Ready"
+    doc.quote_ready_at = frappe.utils.now_datetime()
+
+    doc.save()
+
+    return {
+        "name": doc.name,
+        "status": doc.status,
+        "customer": doc.customer,
+        "quotation": doc.quotation,
+        "quotation_docstatus": quotation_docstatus,
+    }

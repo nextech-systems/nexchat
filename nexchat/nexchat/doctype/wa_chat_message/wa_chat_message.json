@@ -13,6 +13,7 @@
   "timestamp",
   "ack_status",
   "sent_by",
+  "is_bot_reply",
   "content_section",
   "message",
   "media_file",
@@ -72,6 +73,14 @@
    "label": "Sent By",
    "options": "User",
    "description": "ERPNext user who sent this outgoing message"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_bot_reply",
+   "fieldtype": "Check",
+   "label": "Sent by AI Bot",
+   "read_only": 1,
+   "description": "Auto-reply sent by the AI without a human agent - kept unassigned so a human can still take over"
   },
   {
    "fieldname": "content_section",

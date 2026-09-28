@@ -1,0 +1,81 @@
+import frappe
+from frappe import _
+from frappe.model.document import Document
+
+
+ALLOWED_ROLE = "Voice Agent API"
+
+
+class SalesRequest(Document):
+    def validate(self):
+        if self.rep_code:
+            self.rep_code = self.rep_code.strip().upper()
+
+
+def _require_voice_agent_role():
+    roles = frappe.get_roles(frappe.session.user)
+
+    if ALLOWED_ROLE not in roles and "System Manager" not in roles:
+        frappe.throw(
+            _("Not permitted to create Sales Requests."),
+            frappe.PermissionError,
+        )
+
+
+@frappe.whitelist()
+def create_sales_request(
+    rep_code=None,
+    source="AI Voice",
+    request_text=None,
+):
+    _require_voice_agent_role()
+
+    rep_code = (rep_code or "").strip().upper()
+
+    if not rep_code:
+        frappe.throw(
+            _("Rep Code is required."),
+            frappe.ValidationError,
+        )
+
+    rep = frappe.db.get_value(
+        "AI Sales Rep",
+        {
+            "rep_code": rep_code,
+            "active": 1,
+        },
+        [
+            "rep_name",
+            "sales_person",
+        ],
+        as_dict=True,
+    )
+
+    if not rep:
+        frappe.throw(
+            _("No active AI Sales Rep found for Rep Code {0}.").format(
+                frappe.bold(rep_code)
+            ),
+            frappe.ValidationError,
+        )
+
+    doc = frappe.get_doc({
+        "doctype": "Sales Request",
+        "source": source or "AI Voice",
+        "rep_code": rep_code,
+        "request_text": request_text,
+        "status": "New",
+    })
+
+    doc.insert()
+
+    return {
+        "name": doc.name,
+        "status": doc.status,
+        "source": doc.source,
+        "rep_code": doc.rep_code,
+        "rep_name": doc.rep_name,
+        "sales_person": doc.sales_person,
+        "customer": doc.customer,
+        "quotation": doc.quotation,
+    }

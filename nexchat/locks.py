@@ -26,6 +26,7 @@ from nexchat.nexchat.doctype.conversation_queue.conversation_queue import sync_q
 # conversation doctype is ready to share this locking/SLA machinery.
 CHANNEL_DOCTYPES = {
 	"WA Conversation": "WhatsApp",
+	"Web Conversation": "Website",
 }
 
 

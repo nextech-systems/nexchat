@@ -1,0 +1,37 @@
+import frappe
+
+
+def on_quotation_update(doc, method=None):
+    sales_request = (
+        doc.get("custom_nexchat_sales_request")
+        or ""
+    ).strip()
+
+    if not sales_request:
+        return
+
+    # This integration only reacts to Draft Quotations.
+    if doc.docstatus != 0:
+        return
+
+    if not frappe.db.exists(
+        "Sales Request",
+        sales_request,
+    ):
+        frappe.log_error(
+            title="NexChat Quotation Link Error",
+            message=(
+                f"Quotation {doc.name} references missing "
+                f"Sales Request {sales_request}"
+            ),
+        )
+        return
+
+    from nexchat.nexchat.doctype.sales_request.sales_request import (
+        link_draft_quotation,
+    )
+
+    link_draft_quotation(
+        sales_request=sales_request,
+        quotation=doc.name,
+    )

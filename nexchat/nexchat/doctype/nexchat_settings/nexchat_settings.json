@@ -20,7 +20,18 @@
   "first_reminder_minutes",
   "sla_column",
   "escalation_minutes",
-  "supervisor_role"
+  "supervisor_role",
+  "ai_section",
+  "ai_enabled",
+  "ai_ollama_url",
+  "ai_model",
+  "ai_column",
+  "ai_max_response_chars",
+  "ai_escalation_keywords",
+  "ai_system_prompt",
+  "ai_escalation_ack_message",
+  "email_section",
+  "support_email_account"
  ],
  "fields": [
   {
@@ -113,6 +124,76 @@
    "fieldtype": "Link",
    "label": "Supervisor Role",
    "options": "Role"
+  },
+  {
+   "fieldname": "ai_section",
+   "fieldtype": "Section Break",
+   "label": "AI Auto-Reply"
+  },
+  {
+   "default": "0",
+   "fieldname": "ai_enabled",
+   "fieldtype": "Check",
+   "label": "Enable AI Auto-Reply",
+   "description": "Master switch. Only fires on unclaimed conversations for messages that don't match any escalation keyword below."
+  },
+  {
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_ollama_url",
+   "fieldtype": "Data",
+   "label": "Ollama URL",
+   "description": "Base URL of the Ollama server, no trailing slash. Example: http://11.0.11.35:11434"
+  },
+  {
+   "default": "llama3.1:8b",
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_model",
+   "fieldtype": "Data",
+   "label": "Model"
+  },
+  {
+   "fieldname": "ai_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "500",
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_max_response_chars",
+   "fieldtype": "Int",
+   "label": "Max Response Length (characters)"
+  },
+  {
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_escalation_keywords",
+   "fieldtype": "Small Text",
+   "label": "Escalation Keywords",
+   "description": "Comma-separated. Any match anywhere in the customer's message forces escalation to a human - never sent to the AI. Leave blank to use the built-in default list."
+  },
+  {
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_system_prompt",
+   "fieldtype": "Long Text",
+   "label": "System Prompt",
+   "description": "Leave blank to use the built-in default. The model is instructed to reply with exactly ESCALATE when unsure - that response is caught and never sent to the customer."
+  },
+  {
+   "depends_on": "ai_enabled",
+   "fieldname": "ai_escalation_ack_message",
+   "fieldtype": "Small Text",
+   "label": "Escalation Acknowledgment Message",
+   "description": "Sent once, automatically, when a message needs a human (matched an escalation keyword, or the AI itself wasn't confident) and nobody's claimed the conversation yet. Leave blank to use the built-in default. Does not count as answering the customer - the SLA reminder/escalation timers keep running normally."
+  },
+  {
+   "fieldname": "email_section",
+   "fieldtype": "Section Break",
+   "label": "Email Channel"
+  },
+  {
+   "fieldname": "support_email_account",
+   "fieldtype": "Link",
+   "label": "Support Email Account",
+   "options": "Email Account",
+   "description": "The dedicated mailbox NexChat treats as a support inbox. Only Communications on this account become Email Conversations - everything else (invoices, quotations, other mail) is left alone. Also replies go out from this account. Leave blank to keep the email channel fully disabled."
   }
  ],
  "issingle": 1,

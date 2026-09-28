@@ -1,0 +1,121 @@
+{
+  "doctype": "DocType",
+  "name": "Sales Request",
+  "module": "NexChat",
+  "custom": 0,
+  "is_submittable": 0,
+  "track_changes": 1,
+  "autoname": "naming_series:",
+  "fields": [
+    {
+      "fieldname": "naming_series",
+      "label": "Series",
+      "fieldtype": "Select",
+      "options": "SAL-REQ-.YYYY.-.#####",
+      "default": "SAL-REQ-.YYYY.-.#####",
+      "reqd": 1
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "New\nIn Progress\nWaiting on Rep\nQuote Ready\nCompleted\nCancelled",
+      "default": "New",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "priority",
+      "label": "Priority",
+      "fieldtype": "Select",
+      "options": "Low\nNormal\nHigh\nUrgent",
+      "default": "Normal",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "assigned_to",
+      "label": "Assigned To",
+      "fieldtype": "Link",
+      "options": "User",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "source",
+      "label": "Source",
+      "fieldtype": "Select",
+      "options": "Manual\nAI Voice\nPBX\nWhatsApp",
+      "default": "Manual",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "rep_code",
+      "label": "Rep Code",
+      "fieldtype": "Link",
+      "options": "AI Sales Rep",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "rep_name",
+      "label": "Rep Name",
+      "fieldtype": "Data",
+      "fetch_from": "rep_code.rep_name",
+      "read_only": 1
+    },
+    {
+      "fieldname": "sales_person",
+      "label": "Sales Person",
+      "fieldtype": "Link",
+      "options": "Sales Person",
+      "fetch_from": "rep_code.sales_person",
+      "read_only": 1
+    },
+    {
+      "fieldname": "customer",
+      "label": "Customer",
+      "fieldtype": "Link",
+      "options": "Customer",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "request_text",
+      "label": "Request Text",
+      "fieldtype": "Small Text"
+    },
+    {
+      "fieldname": "quotation",
+      "label": "Draft Quotation",
+      "fieldtype": "Link",
+      "options": "Quotation",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "quote_ready_at",
+      "label": "Quote Ready At",
+      "fieldtype": "Datetime",
+      "read_only": 1
+    },
+    {
+      "fieldname": "completed_at",
+      "label": "Completed At",
+      "fieldtype": "Datetime",
+      "read_only": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    },
+    {
+      "role": "Voice Agent API",
+      "read": 1,
+      "write": 1,
+      "create": 1
+    }
+  ]
+}

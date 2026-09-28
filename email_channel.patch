@@ -1,0 +1,719 @@
+diff --git a/nexchat/ai_reply.py b/nexchat/ai_reply.py
+index c236d35..97298c7 100644
+--- a/nexchat/ai_reply.py
++++ b/nexchat/ai_reply.py
+@@ -145,6 +145,21 @@ def generate_reply(message_text, settings=None):
+ 	return reply[:max_chars]
+ 
+ 
++def _dispatch_send(source_doctype, conv, text, by_bot, is_acknowledgment):
++	"""Single place that knows how to actually deliver a message on each
++	channel - used by both the real AI reply and the canned escalation
++	acknowledgment, so a fourth channel only needs one new branch here."""
++	if source_doctype == "WA Conversation":
++		from nexchat.api import send_message
++		send_message(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
++	elif source_doctype == "Web Conversation":
++		from nexchat.website import send_reply
++		send_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
++	elif source_doctype == "Email Conversation":
++		from nexchat.email_channel import send_email_reply
++		send_email_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
++
++
+ def _send_escalation_ack(source_doctype, conv):
+ 	"""One-time canned "someone will follow up" message for a genuinely
+ 	escalated conversation - so the customer isn't left staring at
+@@ -159,21 +174,16 @@ def _send_escalation_ack(source_doctype, conv):
+ 	settings = _settings()
+ 	ack_text = settings.get("ai_escalation_ack_message") or DEFAULT_ESCALATION_ACK
+ 
+-	if source_doctype == "WA Conversation":
+-		from nexchat.api import send_message
+-		send_message(conv.name, ack_text, by_bot=True, is_acknowledgment=True)
+-	else:
+-		from nexchat.website import send_reply
+-		send_reply(conv.name, ack_text, by_bot=True, is_acknowledgment=True)
++	_dispatch_send(source_doctype, conv, ack_text, by_bot=True, is_acknowledgment=True)
+ 
+ 	frappe.db.set_value(source_doctype, conv.name, "ai_ack_sent", 1, update_modified=False)
+ 
+ 
+ def maybe_auto_reply(source_doctype, conversation_name, message_text):
+ 	"""Entry point, called via frappe.enqueue right after a fresh incoming
+-	message is stored (WhatsApp or Website). Deliberately swallows every
+-	exception - a bug in the AI path must never surface as a failure of
+-	the actual message-receipt flow that triggered it."""
++	message is stored (WhatsApp, Website, or Email). Deliberately
++	swallows every exception - a bug in the AI path must never surface
++	as a failure of the actual message-receipt flow that triggered it."""
+ 	try:
+ 		if not frappe.db.exists(source_doctype, conversation_name):
+ 			return
+@@ -206,11 +216,6 @@ def maybe_auto_reply(source_doctype, conversation_name, message_text):
+ 		if not _ai_eligible(conv):
+ 			return
+ 
+-		if source_doctype == "WA Conversation":
+-			from nexchat.api import send_message
+-			send_message(conv.name, reply, by_bot=True)
+-		else:
+-			from nexchat.website import send_reply
+-			send_reply(conv.name, reply, by_bot=True)
++		_dispatch_send(source_doctype, conv, reply, by_bot=True, is_acknowledgment=False)
+ 	except Exception:
+ 		frappe.log_error(frappe.get_traceback(), "NexChat AI Reply")
+diff --git a/nexchat/api.py b/nexchat/api.py
+index 011acc6..1f0d41c 100644
+--- a/nexchat/api.py
++++ b/nexchat/api.py
+@@ -374,19 +374,52 @@ CHANNEL_MESSAGE_DOCTYPE = {
+ 	"Web Conversation": "Web Chat Message",
+ }
+ 
++# All conversation doctypes NexChat Center knows how to open - wider than
++# CHANNEL_MESSAGE_DOCTYPE because Email Conversation doesn't have a
++# dedicated message doctype of its own (it uses Frappe's native
++# Communication instead, see get_messages below).
++VALID_SOURCE_DOCTYPES = ("WA Conversation", "Web Conversation", "Email Conversation")
++
+ 
+ @frappe.whitelist()
+ def get_messages(conversation, source_doctype="WA Conversation", limit=50):
+-	"""Last N messages of a conversation, oldest first. Works for either
+-	channel - source_doctype picks which pair of doctypes to query."""
+-	message_doctype = CHANNEL_MESSAGE_DOCTYPE.get(source_doctype)
+-	if not message_doctype:
++	"""Last N messages of a conversation, oldest first. Works for every
++	channel - source_doctype picks which pair of doctypes to query, or
++	for Email specifically, queries Communication and reshapes it into
++	the same shape the other two channels already return."""
++	if source_doctype not in VALID_SOURCE_DOCTYPES:
+ 		frappe.throw("Unknown channel")
+ 	if not frappe.has_permission(source_doctype, "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	if not frappe.db.exists(source_doctype, conversation):
+ 		frappe.throw(f"Conversation not found: {source_doctype} / {conversation}")
+ 
++	limit_n = min(frappe.utils.cint(limit) or 50, 200)
++
++	if source_doctype == "Email Conversation":
++		comms = frappe.get_all(
++			"Communication",
++			filters={"reference_doctype": source_doctype, "reference_name": conversation},
++			fields=["name", "sent_or_received", "content", "communication_date", "custom_is_bot_reply"],
++			order_by="communication_date desc",
++			limit_page_length=limit_n,
++		)
++		msgs = [
++			{
++				"name": c.name,
++				"direction": "Incoming" if c.sent_or_received == "Received" else "Outgoing",
++				"content_type": "text",
++				"message": frappe.utils.strip_html(c.content or ""),
++				"media_file": None,
++				"timestamp": c.communication_date,
++				"sent_by": None,
++				"is_bot_reply": c.custom_is_bot_reply,
++			}
++			for c in comms
++		]
++		return list(reversed(msgs))
++
++	message_doctype = CHANNEL_MESSAGE_DOCTYPE.get(source_doctype)
+ 	fields = ["name", "direction", "content_type", "message", "media_file", "timestamp", "sent_by", "is_bot_reply"]
+ 	if source_doctype == "WA Conversation":
+ 		fields.append("ack_status")
+@@ -396,15 +429,15 @@ def get_messages(conversation, source_doctype="WA Conversation", limit=50):
+ 		filters={"conversation": conversation},
+ 		fields=fields,
+ 		order_by="timestamp desc",
+-		limit_page_length=min(frappe.utils.cint(limit) or 50, 200),
++		limit_page_length=limit_n,
+ 	)
+ 	return list(reversed(msgs))
+ 
+ 
+ @frappe.whitelist()
+ def mark_read(conversation, source_doctype="WA Conversation"):
+-	"""Reset the unread counter when an agent opens a thread - either channel."""
+-	if source_doctype not in CHANNEL_MESSAGE_DOCTYPE:
++	"""Reset the unread counter when an agent opens a thread - any channel."""
++	if source_doctype not in VALID_SOURCE_DOCTYPES:
+ 		frappe.throw("Unknown channel")
+ 	if not frappe.has_permission(source_doctype, "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+@@ -442,9 +475,9 @@ def workload_counts():
+ @frappe.whitelist()
+ def customer_summary(conversation, source_doctype="WA Conversation"):
+ 	"""Light inline summary for the right column. Heavy detail stays on the
+-	customer form (we just deep-link there). Works for either channel -
+-	both doctypes share the customer/contact/lead/display_name fields."""
+-	if source_doctype not in CHANNEL_MESSAGE_DOCTYPE:
++	customer form (we just deep-link there). Works for every channel -
++	all three doctypes share the customer/contact/lead/display_name fields."""
++	if source_doctype not in VALID_SOURCE_DOCTYPES:
+ 		frappe.throw("Unknown channel")
+ 	if not frappe.has_permission(source_doctype, "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+diff --git a/nexchat/email_channel.py b/nexchat/email_channel.py
+new file mode 100644
+index 0000000..f4fed71
+--- /dev/null
++++ b/nexchat/email_channel.py
+@@ -0,0 +1,199 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++"""Email channel.
++
++Deliberately does NOT reinvent email fetching or a parallel message
++doctype. Frappe's own Email Account (IMAP) already pulls incoming mail
++into Communication records with proper threading, attachments, etc. -
++that is mature, well-tested infrastructure and this module just bridges
++it into the same Conversation Queue / NexChat Center machinery the other
++two channels use.
++
++One Email Conversation per SENDER ADDRESS, not per subject/thread -
++matches WA Conversation (per phone number) and Web Conversation (per
++visitor_id): one row is "this customer", not "this topic". Multiple
++email threads from the same address all land in one conversation.
++
++Scoped to a single dedicated support mailbox (NexChat Settings.
++support_email_account) so this never touches Communications tied to
++ordinary ERPNext email use elsewhere (invoices, quotations, etc.) - the
++hook is a no-op until that setting is configured.
++"""
++
++import frappe
++from frappe.utils import now_datetime
++
++from nexchat.locks import sync_conversation, claim_on_reply
++
++DOCTYPE = "Email Conversation"
++
++
++def on_communication_insert(doc, method=None):
++	"""Registered in hooks.py against Communication's after_insert. Fires
++	for every Communication in the system - the very first checks below
++	must cheaply rule out the overwhelming majority that have nothing to
++	do with NexChat before doing any real work."""
++	try:
++		if doc.communication_type != "Communication":
++			return
++		if doc.communication_medium != "Email":
++			return
++		if doc.sent_or_received != "Received":
++			return
++		if not doc.sender:
++			return
++
++		settings = frappe.get_single("NexChat Settings")
++		support_account = settings.get("support_email_account")
++		if not support_account:
++			return  # feature not configured yet - safe no-op
++		if doc.get("email_account") != support_account:
++			return  # not our support mailbox - leave it alone entirely
++
++		# Don't hijack a communication Frappe already threaded to something
++		# else (shouldn't normally happen on a dedicated support mailbox,
++		# but never overwrite an existing reference either way).
++		if doc.reference_doctype and doc.reference_doctype != DOCTYPE:
++			return
++
++		sender_email = doc.sender.strip().lower()
++		conv_name = frappe.db.get_value(DOCTYPE, {"email": sender_email})
++		if conv_name:
++			conv = frappe.get_doc(DOCTYPE, conv_name)
++		else:
++			conv = frappe.get_doc(
++				{
++					"doctype": DOCTYPE,
++					"email": sender_email,
++					"display_name": doc.sender_full_name or sender_email,
++					"status": "Open",
++				}
++			).insert(ignore_permissions=True)
++
++		if doc.reference_doctype != DOCTYPE or doc.reference_name != conv.name:
++			doc.db_set(
++				{"reference_doctype": DOCTYPE, "reference_name": conv.name},
++				update_modified=False,
++			)
++
++		now = doc.communication_date or now_datetime()
++		content_preview = frappe.utils.strip_html(doc.content or "")[:140]
++		conv.db_set(
++			{
++				"last_incoming_at": now,
++				"last_subject": (doc.subject or "")[:140],
++				"last_message_preview": content_preview,
++				"unread_count": (conv.unread_count or 0) + 1,
++				"status": "Open",
++				"ai_ack_sent": 0,  # a fresh incoming email is a fresh reason to ack again
++			},
++			update_modified=True,
++		)
++		sync_conversation(DOCTYPE, conv.name)
++
++		frappe.publish_realtime(
++			"nexchat_message",
++			{
++				"conversation": conv.name,
++				"source_doctype": DOCTYPE,
++				"message": doc.name,
++				"direction": "Incoming",
++				"preview": content_preview,
++				"display_name": conv.display_name or sender_email,
++			},
++			after_commit=True,
++		)
++
++		frappe.enqueue(
++			"nexchat.ai_reply.maybe_auto_reply",
++			source_doctype=DOCTYPE,
++			conversation_name=conv.name,
++			message_text=frappe.utils.strip_html(doc.content or ""),
++			queue="long",
++			enqueue_after_commit=True,
++		)
++	except Exception:
++		# Never let a bug here break Frappe's own email fetch pipeline -
++		# that would be a much worse failure than NexChat missing one email.
++		frappe.log_error(frappe.get_traceback(), "NexChat Email Channel")
++
++
++@frappe.whitelist()
++def send_email_reply(conversation, message, subject=None, by_bot=False, is_acknowledgment=False):
++	"""Agent (or AI) reply from NexChat Center. Creates the outgoing
++	Communication explicitly rather than relying on frappe.sendmail's
++	side effects, so it's threaded onto this Email Conversation the same
++	deliberate way incoming mail is. is_acknowledgment=True skips
++	last_outgoing_at, same convention as the other two channels - not
++	counted as answering the customer, so the SLA timers keep running."""
++	by_bot = frappe.utils.cint(by_bot)
++	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
++	if not by_bot and not frappe.has_permission(DOCTYPE, "write"):
++		frappe.throw("Not permitted", frappe.PermissionError)
++
++	message = (message or "").strip()
++	if not message:
++		frappe.throw("Message is empty")
++
++	conv = frappe.get_doc(DOCTYPE, conversation)
++	if not by_bot:
++		claim_on_reply(conv.name, frappe.session.user, doctype=DOCTYPE)
++
++	settings = frappe.get_single("NexChat Settings")
++	support_account = settings.get("support_email_account")
++	if not support_account:
++		frappe.throw("NexChat Settings: Support Email Account is not configured")
++
++	subject = subject or (f"Re: {conv.last_subject}" if conv.last_subject else "Re: your message")
++
++	comm = frappe.get_doc(
++		{
++			"doctype": "Communication",
++			"communication_type": "Communication",
++			"communication_medium": "Email",
++			"sent_or_received": "Sent",
++			"reference_doctype": DOCTYPE,
++			"reference_name": conv.name,
++			"subject": subject,
++			"content": message,
++			"recipients": conv.email,
++			"email_account": support_account,
++			"communication_date": now_datetime(),
++		}
++	)
++	comm.insert(ignore_permissions=True)
++	comm.db_set("custom_is_bot_reply", 1 if by_bot else 0, update_modified=False)
++	# Actually sends the email via the configured Email Account's SMTP.
++	comm.send_email()
++
++	now = now_datetime()
++	conv_updates = {"last_message_preview": message[:140]}
++	if not is_acknowledgment:
++		conv_updates["last_outgoing_at"] = now
++	conv.db_set(conv_updates, update_modified=True)
++	sync_conversation(DOCTYPE, conv.name)
++
++	frappe.publish_realtime(
++		"nexchat_message",
++		{
++			"conversation": conv.name,
++			"source_doctype": DOCTYPE,
++			"message": comm.name,
++			"direction": "Outgoing",
++			"preview": message[:140],
++			"display_name": conv.display_name or conv.email,
++			"is_bot_reply": bool(by_bot),
++		},
++		after_commit=True,
++	)
++	return comm.name
++
++
++@frappe.whitelist()
++def mark_read(conversation):
++	if not frappe.has_permission(DOCTYPE, "write"):
++		frappe.throw("Not permitted", frappe.PermissionError)
++	frappe.db.set_value(DOCTYPE, conversation, "unread_count", 0, update_modified=False)
++	sync_conversation(DOCTYPE, conversation)
++	return True
+diff --git a/nexchat/hooks.py b/nexchat/hooks.py
+index 6b17290..a0302a1 100644
+--- a/nexchat/hooks.py
++++ b/nexchat/hooks.py
+@@ -124,6 +124,12 @@ app_license = "MIT"
+ # 	}
+ # }
+ 
++doc_events = {
++	"Communication": {
++		"after_insert": "nexchat.email_channel.on_communication_insert",
++	}
++}
++
+ # Scheduled Tasks
+ # ---------------
+ 
+diff --git a/nexchat/locks.py b/nexchat/locks.py
+index dfa68d3..27f603b 100644
+--- a/nexchat/locks.py
++++ b/nexchat/locks.py
+@@ -26,6 +26,8 @@ from nexchat.nexchat.doctype.conversation_queue.conversation_queue import sync_q
+ # conversation doctype is ready to share this locking/SLA machinery.
+ CHANNEL_DOCTYPES = {
+ 	"WA Conversation": "WhatsApp",
++	"Web Conversation": "Website",
++	"Email Conversation": "Email",
+ }
+ 
+ 
+diff --git a/nexchat/nexchat/doctype/email_conversation/__init__.py b/nexchat/nexchat/doctype/email_conversation/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/nexchat/nexchat/doctype/email_conversation/email_conversation.json b/nexchat/nexchat/doctype/email_conversation/email_conversation.json
+new file mode 100644
+index 0000000..a6bcd1f
+--- /dev/null
++++ b/nexchat/nexchat/doctype/email_conversation/email_conversation.json
+@@ -0,0 +1,233 @@
++{
++ "actions": [],
++ "autoname": "field:email",
++ "creation": "2026-08-13 12:00:00.000000",
++ "doctype": "DocType",
++ "editable_grid": 1,
++ "engine": "InnoDB",
++ "field_order": [
++  "email",
++  "display_name",
++  "last_subject",
++  "conv_column_a",
++  "status",
++  "sla_state",
++  "crm_section",
++  "contact",
++  "customer",
++  "crm_column",
++  "lead",
++  "assignment_section",
++  "assigned_agent",
++  "assign_column",
++  "claimed_at",
++  "last_agent",
++  "reminded_at",
++  "activity_section",
++  "last_incoming_at",
++  "last_outgoing_at",
++  "activity_column",
++  "unread_count",
++  "last_message_preview",
++  "ai_ack_sent"
++ ],
++ "fields": [
++  {
++   "fieldname": "email",
++   "fieldtype": "Data",
++   "in_standard_filter": 1,
++   "label": "Email Address",
++   "options": "Email",
++   "reqd": 1,
++   "unique": 1,
++   "description": "One conversation per sender address - every thread from this customer lands here, same model as WA Conversation is per phone number"
++  },
++  {
++   "fieldname": "display_name",
++   "fieldtype": "Data",
++   "in_list_view": 1,
++   "label": "Display Name",
++   "description": "From the sender's name on their most recent email"
++  },
++  {
++   "fieldname": "last_subject",
++   "fieldtype": "Data",
++   "label": "Last Subject",
++   "read_only": 1,
++   "description": "Subject of the most recent incoming email - used to build the Re: line when an agent or the AI replies"
++  },
++  {
++   "fieldname": "conv_column_a",
++   "fieldtype": "Column Break"
++  },
++  {
++   "default": "Open",
++   "fieldname": "status",
++   "fieldtype": "Select",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Status",
++   "options": "Open\nResolved"
++  },
++  {
++   "default": "OK",
++   "fieldname": "sla_state",
++   "fieldtype": "Select",
++   "label": "SLA State",
++   "options": "OK\nReminded\nEscalated",
++   "read_only": 1
++  },
++  {
++   "fieldname": "crm_section",
++   "fieldtype": "Section Break",
++   "label": "CRM Links"
++  },
++  {
++   "fieldname": "contact",
++   "fieldtype": "Link",
++   "label": "Contact",
++   "options": "Contact"
++  },
++  {
++   "fieldname": "customer",
++   "fieldtype": "Link",
++   "in_standard_filter": 1,
++   "label": "Customer",
++   "options": "Customer"
++  },
++  {
++   "fieldname": "crm_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "fieldname": "lead",
++   "fieldtype": "Link",
++   "label": "Lead",
++   "options": "Lead"
++  },
++  {
++   "fieldname": "assignment_section",
++   "fieldtype": "Section Break",
++   "label": "Assignment"
++  },
++  {
++   "fieldname": "assigned_agent",
++   "fieldtype": "Link",
++   "in_list_view": 1,
++   "in_standard_filter": 1,
++   "label": "Assigned Agent",
++   "options": "User"
++  },
++  {
++   "fieldname": "assign_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "fieldname": "claimed_at",
++   "fieldtype": "Datetime",
++   "label": "Claimed At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_agent",
++   "fieldtype": "Link",
++   "label": "Last Agent",
++   "options": "User",
++   "read_only": 1,
++   "description": "Most recent agent to handle this conversation; persists across release for sticky routing"
++  },
++  {
++   "fieldname": "reminded_at",
++   "fieldtype": "Datetime",
++   "label": "Reminded At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "activity_section",
++   "fieldtype": "Section Break",
++   "label": "Activity"
++  },
++  {
++   "fieldname": "last_incoming_at",
++   "fieldtype": "Datetime",
++   "label": "Last Incoming At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_outgoing_at",
++   "fieldtype": "Datetime",
++   "label": "Last Outgoing At",
++   "read_only": 1
++  },
++  {
++   "fieldname": "activity_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "default": "0",
++   "fieldname": "unread_count",
++   "fieldtype": "Int",
++   "in_list_view": 1,
++   "label": "Unread Count",
++   "read_only": 1
++  },
++  {
++   "fieldname": "last_message_preview",
++   "fieldtype": "Small Text",
++   "label": "Last Message Preview",
++   "read_only": 1
++  },
++  {
++   "default": "0",
++   "fieldname": "ai_ack_sent",
++   "fieldtype": "Check",
++   "label": "AI Acknowledgment Sent",
++   "read_only": 1,
++   "description": "One-time canned escalation acknowledgment already sent - prevents repeating it on every subsequent message while still unassigned"
++  }
++ ],
++ "links": [],
++ "modified": "2026-08-13 12:00:00.000000",
++ "modified_by": "Administrator",
++ "module": "NexChat",
++ "name": "Email Conversation",
++ "owner": "Administrator",
++ "permissions": [
++  {
++   "create": 1,
++   "delete": 1,
++   "email": 1,
++   "export": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "System Manager",
++   "share": 1,
++   "write": 1
++  },
++  {
++   "email": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Agent",
++   "share": 1,
++   "write": 1
++  },
++  {
++   "email": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "NexChat Supervisor",
++   "share": 1,
++   "write": 1
++  }
++ ],
++ "search_fields": "email,display_name,customer",
++ "sort_field": "modified",
++ "sort_order": "DESC",
++ "states": [],
++ "title_field": "display_name",
++ "track_changes": 1
++}
+diff --git a/nexchat/nexchat/doctype/email_conversation/email_conversation.py b/nexchat/nexchat/doctype/email_conversation/email_conversation.py
+new file mode 100644
+index 0000000..1c408fa
+--- /dev/null
++++ b/nexchat/nexchat/doctype/email_conversation/email_conversation.py
+@@ -0,0 +1,8 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++from frappe.model.document import Document
++
++
++class EmailConversation(Document):
++	pass
+diff --git a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+index 35a687b..03dfdfa 100644
+--- a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
++++ b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+@@ -29,7 +29,9 @@
+   "ai_max_response_chars",
+   "ai_escalation_keywords",
+   "ai_system_prompt",
+-  "ai_escalation_ack_message"
++  "ai_escalation_ack_message",
++  "email_section",
++  "support_email_account"
+  ],
+  "fields": [
+   {
+@@ -180,6 +182,18 @@
+    "fieldtype": "Small Text",
+    "label": "Escalation Acknowledgment Message",
+    "description": "Sent once, automatically, when a message needs a human (matched an escalation keyword, or the AI itself wasn't confident) and nobody's claimed the conversation yet. Leave blank to use the built-in default. Does not count as answering the customer - the SLA reminder/escalation timers keep running normally."
++  },
++  {
++   "fieldname": "email_section",
++   "fieldtype": "Section Break",
++   "label": "Email Channel"
++  },
++  {
++   "fieldname": "support_email_account",
++   "fieldtype": "Link",
++   "label": "Support Email Account",
++   "options": "Email Account",
++   "description": "The dedicated mailbox NexChat treats as a support inbox. Only Communications on this account become Email Conversations - everything else (invoices, quotations, other mail) is left alone. Also replies go out from this account. Leave blank to keep the email channel fully disabled."
+   }
+  ],
+  "issingle": 1,
+diff --git a/nexchat/nexchat/page/nexchat_center/nexchat_center.js b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+index f7c03bd..c5d6083 100644
+--- a/nexchat/nexchat/page/nexchat_center/nexchat_center.js
++++ b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+@@ -172,7 +172,12 @@ class NexChatCenter {
+ 			const cls = (this.active && this.active.name === c.name) ? "active" : (c.sticky_mine ? "sticky" : "");
+ 			const name = esc(c.display_name || c.name);
+ 			const sub = c.customer ? esc(c.customer) : (c.lead ? __("Lead") : (c.sticky_mine ? __("Returning - yours") : __("Unlinked")));
+-			const channel_color = c.channel === "Website" ? "var(--blue-100,#d8e6fd)" : "var(--green-100,#d4f5dd)";
++			const CHANNEL_COLORS = {
++				Website: "var(--blue-100,#d8e6fd)",
++				Email: "var(--orange-100,#fde3ce)",
++				WhatsApp: "var(--green-100,#d4f5dd)",
++			};
++			const channel_color = CHANNEL_COLORS[c.channel] || "var(--bg-color)";
+ 			const channel_chip = ` <span class="nxc-chip" style="background:${channel_color}">${esc(c.channel || "")}</span>`;
+ 			const chip = (multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "") + channel_chip;
+ 			const badge = c.unread_count ? `<span class="nxc-badge">${c.unread_count}</span>` : "";
+@@ -261,11 +266,13 @@ class NexChatCenter {
+ 		this.sending = true;
+ 		const $b = this.$thread.find(".nxc-send").prop("disabled", true);
+ 		// Each channel has its own send path (WhatsApp goes through the
+-		// OpenWA gateway, Website just writes a Web Chat Message directly) -
++		// OpenWA gateway, Website/Email just write their own record) -
+ 		// same args shape either way, just a different method.
+-		const method = this.active.source_doctype === "Web Conversation"
+-			? "nexchat.website.send_reply"
+-			: "nexchat.api.send_message";
++		const SEND_METHOD = {
++			"Web Conversation": "nexchat.website.send_reply",
++			"Email Conversation": "nexchat.email_channel.send_email_reply",
++		};
++		const method = SEND_METHOD[this.active.source_doctype] || "nexchat.api.send_message";
+ 		frappe.call({
+ 			method,
+ 			args: { conversation: this.active.name, message: text },

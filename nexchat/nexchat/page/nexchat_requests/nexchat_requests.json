@@ -1,0 +1,25 @@
+{
+  "content": null,
+  "doctype": "Page",
+  "icon": "octicon octicon-project",
+  "idx": 0,
+  "module": "NexChat",
+  "name": "nexchat-requests",
+  "page_name": "nexchat-requests",
+  "roles": [
+    {
+      "role": "System Manager"
+    },
+    {
+      "role": "NexChat Agent"
+    },
+    {
+      "role": "NexChat Supervisor"
+    }
+  ],
+  "script": null,
+  "standard": "Yes",
+  "style": null,
+  "system_page": 0,
+  "title": "Sales Request Hub"
+}

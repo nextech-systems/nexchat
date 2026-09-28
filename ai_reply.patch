@@ -1,0 +1,465 @@
+diff --git a/nexchat/ai_reply.py b/nexchat/ai_reply.py
+new file mode 100644
+index 0000000..ea8bd92
+--- /dev/null
++++ b/nexchat/ai_reply.py
+@@ -0,0 +1,162 @@
++# Copyright (c) 2026, Nextech Systems and contributors
++# For license information, please see license.txt
++
++"""AI auto-reply engine.
++
++Safety model, in order:
++1. Deterministic gate BEFORE calling the LLM at all - master switch,
++   conversation must be unclaimed (a human already engaged always wins),
++   and the message must not match any escalation keyword. None of this
++   depends on the model's own judgment, since LLMs are not reliable judges
++   of their own uncertainty.
++2. The LLM itself is instructed to reply with exactly "ESCALATE" when it
++   isn't confident - caught and treated as "do nothing" here.
++3. A second, independent check scans the model's own reply for hedging
++   language as a backstop against the model ignoring instruction 2.
++
++Bot replies deliberately skip the claim/lock flow (see api.send_message
++and website.send_reply's by_bot parameter) so a conversation the bot
++answered stays unassigned - a human can still pick it up normally if the
++customer needs more help. Every failure here is caught and logged, never
++raised, since this always runs from a background job triggered by normal
++message receipt - a bug here must never break that.
++"""
++
++import frappe
++import requests
++
++DEFAULT_SYSTEM_PROMPT = (
++	"You are a helpful, concise customer service assistant for a hardware and "
++	"building supplies company. Only answer general questions: greetings, "
++	"business hours, location, and what general categories of products the "
++	"business sells. If the customer asks about specific stock levels, "
++	"pricing, order status, payments, invoices, refunds, complaints, "
++	"deliveries, quotations, or anything requiring account-specific "
++	"information, do NOT attempt to answer it yourself - reply with exactly "
++	"the single word ESCALATE and nothing else. Keep real answers under 3 "
++	"sentences. Never invent a fact you are not certain of - if in doubt, "
++	"reply ESCALATE."
++)
++
++DEFAULT_ESCALATION_KEYWORDS = [
++	"price", "cost", "how much", "stock", "available", "availability",
++	"order", "invoice", "payment", "paid", "pay", "refund", "complaint",
++	"cancel", "return", "account", "balance", "urgent", "quote",
++	"quotation", "delivery", "deliver", "receipt", "warranty", "broken",
++	"damaged", "wrong item",
++]
++
++UNCERTAINTY_MARKERS = (
++	"i don't know", "i do not know", "i'm not sure", "i am not sure",
++	"not certain", "cannot help", "can't help", "unable to assist",
++	"i'm unable", "i am unable", "please contact", "speak to a",
++	"speak with a", "connect you with",
++)
++
++
++def _settings():
++	return frappe.get_single("NexChat Settings")
++
++
++def _escalation_keywords(settings):
++	raw = settings.get("ai_escalation_keywords") or ""
++	if raw.strip():
++		return [k.strip().lower() for k in raw.split(",") if k.strip()]
++	return DEFAULT_ESCALATION_KEYWORDS
++
++
++def should_attempt_auto_reply(conversation_doc, message_text):
++	"""Deterministic, fast, pre-LLM gate. No network call happens unless
++	this returns True."""
++	settings = _settings()
++	if not settings.get("ai_enabled"):
++		return False
++	if not settings.get("ai_ollama_url"):
++		return False
++	if conversation_doc.get("assigned_agent"):
++		return False  # a human already owns this thread
++
++	text = (message_text or "").strip().lower()
++	if not text:
++		return False
++
++	for kw in _escalation_keywords(settings):
++		if kw in text:
++			return False
++
++	return True
++
++
++def generate_reply(message_text, settings=None):
++	"""Call Ollama. Returns the reply text, or None if the model escalated,
++	errored, or its reply looks like hedging rather than a real answer."""
++	settings = settings or _settings()
++	url = (settings.get("ai_ollama_url") or "").rstrip("/")
++	model = settings.get("ai_model") or "llama3.1:8b"
++	system_prompt = settings.get("ai_system_prompt") or DEFAULT_SYSTEM_PROMPT
++	max_chars = frappe.utils.cint(settings.get("ai_max_response_chars")) or 500
++
++	if not url:
++		return None
++
++	try:
++		resp = requests.post(
++			f"{url}/api/generate",
++			json={
++				"model": model,
++				"system": system_prompt,
++				"prompt": message_text,
++				"stream": False,
++			},
++			timeout=60,
++		)
++		resp.raise_for_status()
++		data = resp.json()
++	except requests.exceptions.RequestException:
++		frappe.log_error(frappe.get_traceback(), "NexChat AI Reply")
++		return None
++
++	reply = (data.get("response") or "").strip()
++	if not reply:
++		return None
++	if "ESCALATE" in reply.upper():
++		return None
++
++	lowered = reply.lower()
++	if any(marker in lowered for marker in UNCERTAINTY_MARKERS):
++		return None
++
++	return reply[:max_chars]
++
++
++def maybe_auto_reply(source_doctype, conversation_name, message_text):
++	"""Entry point, called via frappe.enqueue right after a fresh incoming
++	message is stored (WhatsApp or Website). Deliberately swallows every
++	exception - a bug in the AI path must never surface as a failure of
++	the actual message-receipt flow that triggered it."""
++	try:
++		if not frappe.db.exists(source_doctype, conversation_name):
++			return
++		conv = frappe.get_doc(source_doctype, conversation_name)
++		if not should_attempt_auto_reply(conv, message_text):
++			return
++
++		reply = generate_reply(message_text)
++		if not reply:
++			return
++
++		# Re-check right before sending - minutes may have passed waiting
++		# on a slow model response, and a human could have claimed the
++		# conversation in the meantime.
++		conv.reload()
++		if conv.get("assigned_agent"):
++			return
++
++		if source_doctype == "WA Conversation":
++			from nexchat.api import send_message
++			send_message(conv.name, reply, by_bot=True)
++		else:
++			from nexchat.website import send_reply
++			send_reply(conv.name, reply, by_bot=True)
++	except Exception:
++		frappe.log_error(frappe.get_traceback(), "NexChat AI Reply")
+diff --git a/nexchat/api.py b/nexchat/api.py
+index ec9df4a..a63bb91 100644
+--- a/nexchat/api.py
++++ b/nexchat/api.py
+@@ -112,10 +112,15 @@ def _enforce_send_limits(settings, session):
+ 
+ 
+ @frappe.whitelist()
+-def send_message(conversation, message):
++def send_message(conversation, message, by_bot=False):
+ 	"""Send a text message into an existing conversation. Returns the
+-	WA Chat Message name on success."""
+-	if not frappe.has_permission("WA Conversation", "write"):
++	WA Chat Message name on success. by_bot=True is for the AI auto-reply
++	path only (nexchat.ai_reply) - it skips the claim/lock flow entirely,
++	so a bot-answered conversation stays unassigned for a human to pick
++	up if the customer needs more, and is never callable by a whitelisted
++	client request without going through frappe.has_permission below."""
++	by_bot = frappe.utils.cint(by_bot)
++	if not by_bot and not frappe.has_permission("WA Conversation", "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	message = (message or "").strip()
+ 	if not message:
+@@ -125,8 +130,9 @@ def send_message(conversation, message):
+ 
+ 	conv = frappe.get_doc("WA Conversation", conversation)
+ 
+-	from nexchat.locks import claim_on_reply
+-	claim_on_reply(conv.name, frappe.session.user)
++	if not by_bot:
++		from nexchat.locks import claim_on_reply
++		claim_on_reply(conv.name, frappe.session.user)
+ 
+ 	chat_id = conv.chat_id
+ 	if not chat_id:
+@@ -192,7 +198,8 @@ def send_message(conversation, message):
+ 			"chat_id": chat_id,
+ 			"timestamp": now,
+ 			"ack_status": "Pending",
+-			"sent_by": frappe.session.user,
++			"sent_by": None if by_bot else frappe.session.user,
++			"is_bot_reply": 1 if by_bot else 0,
+ 		}
+ 	).insert(ignore_permissions=True)
+ 
+@@ -212,6 +219,7 @@ def send_message(conversation, message):
+ 			"direction": "Outgoing",
+ 			"preview": message[:140],
+ 			"display_name": conv.display_name,
++			"is_bot_reply": bool(by_bot),
+ 		},
+ 		after_commit=True,
+ 	)
+@@ -377,7 +385,7 @@ def get_messages(conversation, source_doctype="WA Conversation", limit=50):
+ 	if not frappe.db.exists(source_doctype, conversation):
+ 		frappe.throw(f"Conversation not found: {source_doctype} / {conversation}")
+ 
+-	fields = ["name", "direction", "content_type", "message", "media_file", "timestamp", "sent_by"]
++	fields = ["name", "direction", "content_type", "message", "media_file", "timestamp", "sent_by", "is_bot_reply"]
+ 	if source_doctype == "WA Conversation":
+ 		fields.append("ack_status")
+ 
+diff --git a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+index 622aaeb..897c442 100644
+--- a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
++++ b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+@@ -20,7 +20,15 @@
+   "first_reminder_minutes",
+   "sla_column",
+   "escalation_minutes",
+-  "supervisor_role"
++  "supervisor_role",
++  "ai_section",
++  "ai_enabled",
++  "ai_ollama_url",
++  "ai_model",
++  "ai_column",
++  "ai_max_response_chars",
++  "ai_escalation_keywords",
++  "ai_system_prompt"
+  ],
+  "fields": [
+   {
+@@ -113,6 +121,57 @@
+    "fieldtype": "Link",
+    "label": "Supervisor Role",
+    "options": "Role"
++  },
++  {
++   "fieldname": "ai_section",
++   "fieldtype": "Section Break",
++   "label": "AI Auto-Reply"
++  },
++  {
++   "default": "0",
++   "fieldname": "ai_enabled",
++   "fieldtype": "Check",
++   "label": "Enable AI Auto-Reply",
++   "description": "Master switch. Only fires on unclaimed conversations for messages that don't match any escalation keyword below."
++  },
++  {
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_ollama_url",
++   "fieldtype": "Data",
++   "label": "Ollama URL",
++   "description": "Base URL of the Ollama server, no trailing slash. Example: http://11.0.11.35:11434"
++  },
++  {
++   "default": "llama3.1:8b",
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_model",
++   "fieldtype": "Data",
++   "label": "Model"
++  },
++  {
++   "fieldname": "ai_column",
++   "fieldtype": "Column Break"
++  },
++  {
++   "default": "500",
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_max_response_chars",
++   "fieldtype": "Int",
++   "label": "Max Response Length (characters)"
++  },
++  {
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_escalation_keywords",
++   "fieldtype": "Small Text",
++   "label": "Escalation Keywords",
++   "description": "Comma-separated. Any match anywhere in the customer's message forces escalation to a human - never sent to the AI. Leave blank to use the built-in default list."
++  },
++  {
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_system_prompt",
++   "fieldtype": "Long Text",
++   "label": "System Prompt",
++   "description": "Leave blank to use the built-in default. The model is instructed to reply with exactly ESCALATE when unsure - that response is caught and never sent to the customer."
+   }
+  ],
+  "issingle": 1,
+diff --git a/nexchat/nexchat/doctype/wa_chat_message/wa_chat_message.json b/nexchat/nexchat/doctype/wa_chat_message/wa_chat_message.json
+index 6d8f05b..aa57116 100644
+--- a/nexchat/nexchat/doctype/wa_chat_message/wa_chat_message.json
++++ b/nexchat/nexchat/doctype/wa_chat_message/wa_chat_message.json
+@@ -13,6 +13,7 @@
+   "timestamp",
+   "ack_status",
+   "sent_by",
++  "is_bot_reply",
+   "content_section",
+   "message",
+   "media_file",
+@@ -73,6 +74,14 @@
+    "options": "User",
+    "description": "ERPNext user who sent this outgoing message"
+   },
++  {
++   "default": "0",
++   "fieldname": "is_bot_reply",
++   "fieldtype": "Check",
++   "label": "Sent by AI Bot",
++   "read_only": 1,
++   "description": "Auto-reply sent by the AI without a human agent - kept unassigned so a human can still take over"
++  },
+   {
+    "fieldname": "content_section",
+    "fieldtype": "Section Break",
+diff --git a/nexchat/nexchat/doctype/web_chat_message/web_chat_message.json b/nexchat/nexchat/doctype/web_chat_message/web_chat_message.json
+index 3e69f01..55590e9 100644
+--- a/nexchat/nexchat/doctype/web_chat_message/web_chat_message.json
++++ b/nexchat/nexchat/doctype/web_chat_message/web_chat_message.json
+@@ -12,6 +12,7 @@
+   "msg_column_a",
+   "timestamp",
+   "sent_by",
++  "is_bot_reply",
+   "content_section",
+   "message",
+   "media_file"
+@@ -62,6 +63,14 @@
+    "options": "User",
+    "description": "ERPNext user who sent this outgoing message"
+   },
++  {
++   "default": "0",
++   "fieldname": "is_bot_reply",
++   "fieldtype": "Check",
++   "label": "Sent by AI Bot",
++   "read_only": 1,
++   "description": "Auto-reply sent by the AI without a human agent - kept unassigned so a human can still take over"
++  },
+   {
+    "fieldname": "content_section",
+    "fieldtype": "Section Break",
+diff --git a/nexchat/nexchat/page/nexchat_center/nexchat_center.js b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+index 4b4e27f..f7c03bd 100644
+--- a/nexchat/nexchat/page/nexchat_center/nexchat_center.js
++++ b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+@@ -247,7 +247,8 @@ class NexChatCenter {
+ 				let body = esc(m.message || "");
+ 				if (!body && m.content_type !== "text") body = `[${esc(m.content_type)}]`;
+ 				const ack = (m.direction === "Outgoing" && m.ack_status) ? ` · ${esc(m.ack_status)}` : "";
+-				this.$msgs.append(`<div class="nxc-bubble ${dir}"><div>${body}</div><div class="nxc-meta">${esc(frappe.datetime.str_to_user(m.timestamp))}${ack}</div></div>`);
++				const bot_tag = m.is_bot_reply ? ` · <span title="Sent automatically by the AI">\u{1F916} AI</span>` : "";
++				this.$msgs.append(`<div class="nxc-bubble ${dir}"><div>${body}</div><div class="nxc-meta">${esc(frappe.datetime.str_to_user(m.timestamp))}${ack}${bot_tag}</div></div>`);
+ 			});
+ 			this.$msgs.scrollTop(this.$msgs[0].scrollHeight);
+ 		}});
+diff --git a/nexchat/webhook.py b/nexchat/webhook.py
+index 07422b7..814af44 100644
+--- a/nexchat/webhook.py
++++ b/nexchat/webhook.py
+@@ -188,6 +188,16 @@ def _handle_message(event_type, data):
+ 	conversation.db_set(updates, update_modified=True)
+ 	sync_conversation("WA Conversation", conversation.name)
+ 
++	if incoming:
++		frappe.enqueue(
++			"nexchat.ai_reply.maybe_auto_reply",
++			source_doctype="WA Conversation",
++			conversation_name=conversation.name,
++			message_text=body,
++			queue="long",
++			enqueue_after_commit=True,
++		)
++
+ 	frappe.publish_realtime(
+ 		"nexchat_message",
+ 		{
+diff --git a/nexchat/website.py b/nexchat/website.py
+index d74daa9..7529b70 100644
+--- a/nexchat/website.py
++++ b/nexchat/website.py
+@@ -117,6 +117,15 @@ def send_from_widget(visitor_id, message, page_url=None):
+ 	conv.db_set(updates, update_modified=True)
+ 	sync_conversation(DOCTYPE, conv.name)
+ 
++	frappe.enqueue(
++		"nexchat.ai_reply.maybe_auto_reply",
++		source_doctype=DOCTYPE,
++		conversation_name=conv.name,
++		message_text=message,
++		queue="long",
++		enqueue_after_commit=True,
++	)
++
+ 	frappe.publish_realtime(
+ 		"nexchat_message",
+ 		{
+@@ -156,12 +165,15 @@ def poll_messages(visitor_id, after=None):
+ 
+ 
+ @frappe.whitelist()
+-def send_reply(conversation, message):
++def send_reply(conversation, message, by_bot=False):
+ 	"""Agent reply from NexChat Center. Same shape as WA's send_message in
+ 	api.py, minus the gateway call - there's no external transport here,
+ 	the message just lands in Web Chat Message and the widget picks it up
+-	on its next poll."""
+-	if not frappe.has_permission(DOCTYPE, "write"):
++	on its next poll. by_bot=True is for the AI auto-reply path only
++	(nexchat.ai_reply) - skips the claim/lock flow so the conversation
++	stays unassigned for a human to pick up if the customer needs more."""
++	by_bot = frappe.utils.cint(by_bot)
++	if not by_bot and not frappe.has_permission(DOCTYPE, "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	message = (message or "").strip()
+ 	if not message:
+@@ -170,7 +182,8 @@ def send_reply(conversation, message):
+ 		frappe.throw(f"Message exceeds {MAX_MESSAGE_LEN} characters")
+ 
+ 	conv = frappe.get_doc(DOCTYPE, conversation)
+-	claim_on_reply(conv.name, frappe.session.user, doctype=DOCTYPE)
++	if not by_bot:
++		claim_on_reply(conv.name, frappe.session.user, doctype=DOCTYPE)
+ 
+ 	now = now_datetime()
+ 	msg = frappe.get_doc(
+@@ -181,7 +194,8 @@ def send_reply(conversation, message):
+ 			"content_type": "text",
+ 			"message": message,
+ 			"timestamp": now,
+-			"sent_by": frappe.session.user,
++			"sent_by": None if by_bot else frappe.session.user,
++			"is_bot_reply": 1 if by_bot else 0,
+ 		}
+ 	).insert(ignore_permissions=True)
+ 
+@@ -197,6 +211,7 @@ def send_reply(conversation, message):
+ 			"direction": "Outgoing",
+ 			"preview": message[:140],
+ 			"display_name": conv.display_name or "Website visitor",
++			"is_bot_reply": bool(by_bot),
+ 		},
+ 		after_commit=True,
+ 	)

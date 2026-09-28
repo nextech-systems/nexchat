@@ -4,4 +4,6 @@
 *.swp
 tags
 nexchat/docs/current
-node_modules/
+node_modules/*.bak.*
+*.orig
+*.rej

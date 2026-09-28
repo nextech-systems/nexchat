@@ -30,7 +30,8 @@
   "last_outgoing_at",
   "activity_column",
   "unread_count",
-  "last_message_preview"
+  "last_message_preview",
+  "ai_ack_sent"
  ],
  "fields": [
   {
@@ -191,6 +192,14 @@
    "fieldtype": "Small Text",
    "label": "Last Message Preview",
    "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "ai_ack_sent",
+   "fieldtype": "Check",
+   "label": "AI Acknowledgment Sent",
+   "read_only": 1,
+   "description": "One-time canned escalation acknowledgment already sent - prevents repeating it on every subsequent message while still unassigned"
   }
  ],
  "links": [],

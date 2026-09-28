@@ -1,0 +1,288 @@
+diff --git a/nexchat/ai_reply.py b/nexchat/ai_reply.py
+index 97ac29c..c236d35 100644
+--- a/nexchat/ai_reply.py
++++ b/nexchat/ai_reply.py
+@@ -46,6 +46,10 @@ DEFAULT_ESCALATION_KEYWORDS = [
+ 	"damaged", "wrong item",
+ ]
+ 
++DEFAULT_ESCALATION_ACK = (
++	"Thanks for reaching out! A team member will follow up with you shortly."
++)
++
+ UNCERTAINTY_MARKERS = (
+ 	"i don't know", "i do not know", "i'm not sure", "i am not sure",
+ 	"not certain", "cannot help", "can't help", "unable to assist",
+@@ -65,21 +69,32 @@ def _escalation_keywords(settings):
+ 	return DEFAULT_ESCALATION_KEYWORDS
+ 
+ 
+-def should_attempt_auto_reply(conversation_doc, message_text):
+-	"""Deterministic, fast, pre-LLM gate. No network call happens unless
+-	this returns True."""
++def _ai_eligible(conv):
++	"""Base eligibility, independent of message content: feature on,
++	configured, and no human already owns this thread. Shared by the
++	pre-LLM gate and the post-generation re-check so both agree on
++	exactly what "eligible" means."""
+ 	settings = _settings()
+ 	if not settings.get("ai_enabled"):
+ 		return False
+ 	if not settings.get("ai_ollama_url"):
+ 		return False
+-	if conversation_doc.get("assigned_agent"):
+-		return False  # a human already owns this thread
++	if conv.get("assigned_agent"):
++		return False
++	return True
++
++
++def should_attempt_auto_reply(conversation_doc, message_text):
++	"""Deterministic, fast, pre-LLM gate. No network call happens unless
++	this returns True."""
++	if not _ai_eligible(conversation_doc):
++		return False
+ 
+ 	text = (message_text or "").strip().lower()
+ 	if not text:
+ 		return False
+ 
++	settings = _settings()
+ 	for kw in _escalation_keywords(settings):
+ 		if kw in text:
+ 			return False
+@@ -130,6 +145,30 @@ def generate_reply(message_text, settings=None):
+ 	return reply[:max_chars]
+ 
+ 
++def _send_escalation_ack(source_doctype, conv):
++	"""One-time canned "someone will follow up" message for a genuinely
++	escalated conversation - so the customer isn't left staring at
++	silence. Reuses the real send path (so WhatsApp still actually
++	relays it through the gateway, not just a DB row) but passes
++	is_acknowledgment=True so last_outgoing_at is NOT updated - this is
++	deliberately NOT treated as a real answer, so the SLA reminder/
++	escalation timers in locks.py keep running exactly as if nothing
++	had been sent, and a human still gets alerted on schedule."""
++	if conv.get("ai_ack_sent"):
++		return
++	settings = _settings()
++	ack_text = settings.get("ai_escalation_ack_message") or DEFAULT_ESCALATION_ACK
++
++	if source_doctype == "WA Conversation":
++		from nexchat.api import send_message
++		send_message(conv.name, ack_text, by_bot=True, is_acknowledgment=True)
++	else:
++		from nexchat.website import send_reply
++		send_reply(conv.name, ack_text, by_bot=True, is_acknowledgment=True)
++
++	frappe.db.set_value(source_doctype, conv.name, "ai_ack_sent", 1, update_modified=False)
++
++
+ def maybe_auto_reply(source_doctype, conversation_name, message_text):
+ 	"""Entry point, called via frappe.enqueue right after a fresh incoming
+ 	message is stored (WhatsApp or Website). Deliberately swallows every
+@@ -139,18 +178,32 @@ def maybe_auto_reply(source_doctype, conversation_name, message_text):
+ 		if not frappe.db.exists(source_doctype, conversation_name):
+ 			return
+ 		conv = frappe.get_doc(source_doctype, conversation_name)
++
++		text = (message_text or "").strip()
++		if not text:
++			return
++
+ 		if not should_attempt_auto_reply(conv, message_text):
++			# Covers both "feature off / already claimed" (no ack wanted)
++			# and "matched an escalation keyword" (ack wanted) - only the
++			# latter is still AI-eligible at this point.
++			if _ai_eligible(conv):
++				_send_escalation_ack(source_doctype, conv)
+ 			return
+ 
+ 		reply = generate_reply(message_text)
+ 		if not reply:
++			# Model itself escalated, errored, or timed out. Minutes may
++			# have passed on a slow model call, so re-check eligibility
++			# fresh before sending the ack - a human could have claimed
++			# it in the meantime, in which case we stay out of the way.
++			conv.reload()
++			if _ai_eligible(conv):
++				_send_escalation_ack(source_doctype, conv)
+ 			return
+ 
+-		# Re-check right before sending - minutes may have passed waiting
+-		# on a slow model response, and a human could have claimed the
+-		# conversation in the meantime.
+ 		conv.reload()
+-		if conv.get("assigned_agent"):
++		if not _ai_eligible(conv):
+ 			return
+ 
+ 		if source_doctype == "WA Conversation":
+diff --git a/nexchat/api.py b/nexchat/api.py
+index a63bb91..011acc6 100644
+--- a/nexchat/api.py
++++ b/nexchat/api.py
+@@ -112,14 +112,19 @@ def _enforce_send_limits(settings, session):
+ 
+ 
+ @frappe.whitelist()
+-def send_message(conversation, message, by_bot=False):
++def send_message(conversation, message, by_bot=False, is_acknowledgment=False):
+ 	"""Send a text message into an existing conversation. Returns the
+ 	WA Chat Message name on success. by_bot=True is for the AI auto-reply
+ 	path only (nexchat.ai_reply) - it skips the claim/lock flow entirely,
+ 	so a bot-answered conversation stays unassigned for a human to pick
+ 	up if the customer needs more, and is never callable by a whitelisted
+-	client request without going through frappe.has_permission below."""
++	client request without going through frappe.has_permission below.
++	is_acknowledgment=True (canned "someone will follow up" message) does
++	everything a real reply does EXCEPT update last_outgoing_at - this is
++	deliberately not counted as answering the customer, so the SLA
++	reminder/escalation timers in locks.py keep running normally."""
+ 	by_bot = frappe.utils.cint(by_bot)
++	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
+ 	if not by_bot and not frappe.has_permission("WA Conversation", "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	message = (message or "").strip()
+@@ -203,13 +208,10 @@ def send_message(conversation, message, by_bot=False):
+ 		}
+ 	).insert(ignore_permissions=True)
+ 
+-	conv.db_set(
+-		{
+-			"last_outgoing_at": now,
+-			"last_message_preview": message[:140],
+-		},
+-		update_modified=True,
+-	)
++	conv_updates = {"last_message_preview": message[:140]}
++	if not is_acknowledgment:
++		conv_updates["last_outgoing_at"] = now
++	conv.db_set(conv_updates, update_modified=True)
+ 
+ 	frappe.publish_realtime(
+ 		"nexchat_message",
+diff --git a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+index 897c442..35a687b 100644
+--- a/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
++++ b/nexchat/nexchat/doctype/nexchat_settings/nexchat_settings.json
+@@ -28,7 +28,8 @@
+   "ai_column",
+   "ai_max_response_chars",
+   "ai_escalation_keywords",
+-  "ai_system_prompt"
++  "ai_system_prompt",
++  "ai_escalation_ack_message"
+  ],
+  "fields": [
+   {
+@@ -172,6 +173,13 @@
+    "fieldtype": "Long Text",
+    "label": "System Prompt",
+    "description": "Leave blank to use the built-in default. The model is instructed to reply with exactly ESCALATE when unsure - that response is caught and never sent to the customer."
++  },
++  {
++   "depends_on": "ai_enabled",
++   "fieldname": "ai_escalation_ack_message",
++   "fieldtype": "Small Text",
++   "label": "Escalation Acknowledgment Message",
++   "description": "Sent once, automatically, when a message needs a human (matched an escalation keyword, or the AI itself wasn't confident) and nobody's claimed the conversation yet. Leave blank to use the built-in default. Does not count as answering the customer - the SLA reminder/escalation timers keep running normally."
+   }
+  ],
+  "issingle": 1,
+diff --git a/nexchat/nexchat/doctype/wa_conversation/wa_conversation.json b/nexchat/nexchat/doctype/wa_conversation/wa_conversation.json
+index 17610c3..7d0f0d3 100644
+--- a/nexchat/nexchat/doctype/wa_conversation/wa_conversation.json
++++ b/nexchat/nexchat/doctype/wa_conversation/wa_conversation.json
+@@ -30,7 +30,8 @@
+   "last_outgoing_at",
+   "activity_column",
+   "unread_count",
+-  "last_message_preview"
++  "last_message_preview",
++  "ai_ack_sent"
+  ],
+  "fields": [
+   {
+@@ -191,6 +192,14 @@
+    "fieldtype": "Small Text",
+    "label": "Last Message Preview",
+    "read_only": 1
++  },
++  {
++   "default": "0",
++   "fieldname": "ai_ack_sent",
++   "fieldtype": "Check",
++   "label": "AI Acknowledgment Sent",
++   "read_only": 1,
++   "description": "One-time canned escalation acknowledgment already sent - prevents repeating it on every subsequent message while still unassigned"
+   }
+  ],
+  "links": [],
+diff --git a/nexchat/nexchat/doctype/web_conversation/web_conversation.json b/nexchat/nexchat/doctype/web_conversation/web_conversation.json
+index 970640c..400bef6 100644
+--- a/nexchat/nexchat/doctype/web_conversation/web_conversation.json
++++ b/nexchat/nexchat/doctype/web_conversation/web_conversation.json
+@@ -30,7 +30,8 @@
+   "last_outgoing_at",
+   "activity_column",
+   "unread_count",
+-  "last_message_preview"
++  "last_message_preview",
++  "ai_ack_sent"
+  ],
+  "fields": [
+   {
+@@ -191,6 +192,14 @@
+    "fieldtype": "Small Text",
+    "label": "Last Message Preview",
+    "read_only": 1
++  },
++  {
++   "default": "0",
++   "fieldname": "ai_ack_sent",
++   "fieldtype": "Check",
++   "label": "AI Acknowledgment Sent",
++   "read_only": 1,
++   "description": "One-time canned escalation acknowledgment already sent - prevents repeating it on every subsequent message while still unassigned"
+   }
+  ],
+  "links": [],
+diff --git a/nexchat/website.py b/nexchat/website.py
+index 7529b70..ff7b24d 100644
+--- a/nexchat/website.py
++++ b/nexchat/website.py
+@@ -165,14 +165,18 @@ def poll_messages(visitor_id, after=None):
+ 
+ 
+ @frappe.whitelist()
+-def send_reply(conversation, message, by_bot=False):
++def send_reply(conversation, message, by_bot=False, is_acknowledgment=False):
+ 	"""Agent reply from NexChat Center. Same shape as WA's send_message in
+ 	api.py, minus the gateway call - there's no external transport here,
+ 	the message just lands in Web Chat Message and the widget picks it up
+ 	on its next poll. by_bot=True is for the AI auto-reply path only
+ 	(nexchat.ai_reply) - skips the claim/lock flow so the conversation
+-	stays unassigned for a human to pick up if the customer needs more."""
++	stays unassigned for a human to pick up if the customer needs more.
++	is_acknowledgment=True (canned "someone will follow up" message) skips
++	updating last_outgoing_at - not counted as answering the customer, so
++	the SLA reminder/escalation timers in locks.py keep running normally."""
+ 	by_bot = frappe.utils.cint(by_bot)
++	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
+ 	if not by_bot and not frappe.has_permission(DOCTYPE, "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	message = (message or "").strip()
+@@ -199,7 +203,10 @@ def send_reply(conversation, message, by_bot=False):
+ 		}
+ 	).insert(ignore_permissions=True)
+ 
+-	conv.db_set({"last_message_preview": message[:140], "last_outgoing_at": now}, update_modified=True)
++	conv_updates = {"last_message_preview": message[:140]}
++	if not is_acknowledgment:
++		conv_updates["last_outgoing_at"] = now
++	conv.db_set(conv_updates, update_modified=True)
+ 	sync_conversation(DOCTYPE, conv.name)
+ 
+ 	frappe.publish_realtime(

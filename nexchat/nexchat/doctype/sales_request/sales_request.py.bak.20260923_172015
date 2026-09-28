@@ -1,0 +1,8 @@
+import frappe
+from frappe.model.document import Document
+
+
+class SalesRequest(Document):
+    def validate(self):
+        if self.rep_code:
+            self.rep_code = self.rep_code.strip().upper()

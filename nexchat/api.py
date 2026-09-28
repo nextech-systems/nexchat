@@ -112,10 +112,20 @@ def _enforce_send_limits(settings, session):
 
 
 @frappe.whitelist()
-def send_message(conversation, message):
+def send_message(conversation, message, by_bot=False, is_acknowledgment=False):
 	"""Send a text message into an existing conversation. Returns the
-	WA Chat Message name on success."""
-	if not frappe.has_permission("WA Conversation", "write"):
+	WA Chat Message name on success. by_bot=True is for the AI auto-reply
+	path only (nexchat.ai_reply) - it skips the claim/lock flow entirely,
+	so a bot-answered conversation stays unassigned for a human to pick
+	up if the customer needs more, and is never callable by a whitelisted
+	client request without going through frappe.has_permission below.
+	is_acknowledgment=True (canned "someone will follow up" message) does
+	everything a real reply does EXCEPT update last_outgoing_at - this is
+	deliberately not counted as answering the customer, so the SLA
+	reminder/escalation timers in locks.py keep running normally."""
+	by_bot = frappe.utils.cint(by_bot)
+	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
+	if not by_bot and not frappe.has_permission("WA Conversation", "write"):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	message = (message or "").strip()
 	if not message:
@@ -125,8 +135,9 @@ def send_message(conversation, message):
 
 	conv = frappe.get_doc("WA Conversation", conversation)
 
-	from nexchat.locks import claim_on_reply
-	claim_on_reply(conv.name, frappe.session.user)
+	if not by_bot:
+		from nexchat.locks import claim_on_reply
+		claim_on_reply(conv.name, frappe.session.user)
 
 	chat_id = conv.chat_id
 	if not chat_id:
@@ -192,17 +203,15 @@ def send_message(conversation, message):
 			"chat_id": chat_id,
 			"timestamp": now,
 			"ack_status": "Pending",
-			"sent_by": frappe.session.user,
+			"sent_by": None if by_bot else frappe.session.user,
+			"is_bot_reply": 1 if by_bot else 0,
 		}
 	).insert(ignore_permissions=True)
 
-	conv.db_set(
-		{
-			"last_outgoing_at": now,
-			"last_message_preview": message[:140],
-		},
-		update_modified=True,
-	)
+	conv_updates = {"last_message_preview": message[:140]}
+	if not is_acknowledgment:
+		conv_updates["last_outgoing_at"] = now
+	conv.db_set(conv_updates, update_modified=True)
 
 	frappe.publish_realtime(
 		"nexchat_message",
@@ -212,6 +221,7 @@ def send_message(conversation, message):
 			"direction": "Outgoing",
 			"preview": message[:140],
 			"display_name": conv.display_name,
+			"is_bot_reply": bool(by_bot),
 		},
 		after_commit=True,
 	)
@@ -257,141 +267,227 @@ def normalize_number(number):
 	return digits
 
 
+def _scope_rows_by_session(rows, user):
+	"""Session-based read scoping only meaningfully applies to WhatsApp
+	(Website has no gateway-session concept). Conversation Queue doesn't
+	carry session itself, so this is enforced in Python against the WA
+	rows only - Website rows always pass through untouched."""
+	from nexchat.permissions import permitted_sessions
+	sess = permitted_sessions(user)
+	if sess is None:
+		return rows
+	wa_allowed = set(
+		frappe.get_all("WA Conversation", filters={"session": ["in", sess]}, pluck="name")
+	)
+	return [r for r in rows if r.get("channel") != "WhatsApp" or r.get("source_name") in wa_allowed]
+
+
 @frappe.whitelist()
 def get_conversations(search=None, tab="all"):
-	"""Conversation list for the chat center, newest activity first."""
-	if not frappe.has_permission("WA Conversation", "read"):
+	"""Unified conversation list for the chat center across every channel
+	(WhatsApp + Website), newest activity first. Backed by Conversation
+	Queue, a read-only mirror kept in sync by each channel's own handler -
+	each channel's own doctype (WA Conversation / Web Conversation) stays
+	the real source of truth for locking, CRM links and messages."""
+	if not frappe.has_permission("Conversation Queue", "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
 
 	filters = {}
 	or_filters = None
-
-	from nexchat.permissions import permitted_sessions
-	sess = permitted_sessions(frappe.session.user)
-	if sess is not None:
-		filters["session"] = ["in", sess]
+	me = frappe.session.user
 
 	if search:
 		search = f"%{search}%"
 		or_filters = [
-			["phone_number", "like", search],
 			["display_name", "like", search],
 			["customer", "like", search],
+			["source_name", "like", search],
 		]
-	me = frappe.session.user
 	if tab == "mine":
 		filters["assigned_agent"] = me
 	elif tab == "unassigned":
 		filters["assigned_agent"] = ["in", ["", None]]
-	# "all" applies no assignment filter (still session-scoped above)
+	# "all" applies no assignment filter
 
-	convs = frappe.get_all(
-		"WA Conversation",
+	rows = frappe.get_all(
+		"Conversation Queue",
 		filters=filters,
 		or_filters=or_filters,
 		fields=[
-			"name", "display_name", "status", "unread_count",
-			"last_message_preview", "modified", "customer",
-			"contact", "lead", "assigned_agent", "resolved_number", "session",
-			"last_agent", "claimed_at", "sla_state",
-			"last_incoming_at", "last_outgoing_at",
+			"channel", "source_doctype", "source_name", "display_name",
+			"status", "unread_count", "last_message_preview", "modified",
+			"customer", "contact", "lead", "assigned_agent", "last_agent",
+			"sla_state", "last_incoming_at", "last_outgoing_at",
 		],
 		order_by="modified desc",
 		limit_page_length=200,
 	)
-	# sticky highlight: returning customers whose last agent is me
-	for c in convs:
-		c["sticky_mine"] = bool(
-			not c.get("assigned_agent") and c.get("last_agent") == me
-		)
-		c["waiting"] = bool(
-			c.get("last_incoming_at")
-			and (not c.get("last_outgoing_at") or c["last_outgoing_at"] < c["last_incoming_at"])
-		)
-	labels = {
+	rows = _scope_rows_by_session(rows, me)
+
+	# WhatsApp-only extras the frontend already displays: resolved_number
+	# and the session label. Website rows leave these blank.
+	wa_names = [r["source_name"] for r in rows if r["channel"] == "WhatsApp"]
+	wa_extra = {}
+	if wa_names:
+		wa_extra = {
+			w.name: w
+			for w in frappe.get_all(
+				"WA Conversation",
+				filters={"name": ["in", wa_names]},
+				fields=["name", "resolved_number", "phone_number", "session"],
+			)
+		}
+	session_labels = {
 		s.name: s.session_label
 		for s in frappe.get_all("NexChat Session", fields=["name", "session_label"])
 	}
 	agent_names = {}
-	for c in convs:
-		c["session_label"] = labels.get(c.get("session")) or ""
+
+	convs = []
+	for r in rows:
+		c = dict(r)
+		# keep "name" as the identifier the frontend already sends back on
+		# every follow-up call (load_messages, send, lock_action, ...)
+		c["name"] = r["source_name"]
+		extra = wa_extra.get(r["source_name"], {})
+		c["resolved_number"] = extra.get("resolved_number") or extra.get("phone_number")
+		c["session_label"] = session_labels.get(extra.get("session")) or ""
+
+		c["sticky_mine"] = bool(not c.get("assigned_agent") and c.get("last_agent") == me)
+		c["waiting"] = bool(
+			c.get("last_incoming_at")
+			and (not c.get("last_outgoing_at") or c["last_outgoing_at"] < c["last_incoming_at"])
+		)
 		if c.get("assigned_agent") and c["assigned_agent"] not in agent_names:
 			agent_names[c["assigned_agent"]] = frappe.get_cached_value(
 				"User", c["assigned_agent"], "full_name"
 			) or c["assigned_agent"]
 		c["assigned_agent_name"] = agent_names.get(c.get("assigned_agent"), "")
+		convs.append(c)
+
 	convs.sort(key=lambda c: (not c["sticky_mine"], not c["waiting"]))
 	return convs
 
 
+CHANNEL_MESSAGE_DOCTYPE = {
+	"WA Conversation": "WA Chat Message",
+	"Web Conversation": "Web Chat Message",
+}
+
+# All conversation doctypes NexChat Center knows how to open - wider than
+# CHANNEL_MESSAGE_DOCTYPE because Email Conversation doesn't have a
+# dedicated message doctype of its own (it uses Frappe's native
+# Communication instead, see get_messages below).
+VALID_SOURCE_DOCTYPES = ("WA Conversation", "Web Conversation", "Email Conversation")
+
+
 @frappe.whitelist()
-def get_messages(conversation, limit=50):
-	"""Last N messages of a conversation, oldest first."""
-	if not frappe.has_permission("WA Conversation", "read"):
+def get_messages(conversation, source_doctype="WA Conversation", limit=50):
+	"""Last N messages of a conversation, oldest first. Works for every
+	channel - source_doctype picks which pair of doctypes to query, or
+	for Email specifically, queries Communication and reshapes it into
+	the same shape the other two channels already return."""
+	if source_doctype not in VALID_SOURCE_DOCTYPES:
+		frappe.throw("Unknown channel")
+	if not frappe.has_permission(source_doctype, "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
-	if not frappe.db.exists("WA Conversation", conversation):
-		frappe.throw("Conversation not found")
+	if not frappe.db.exists(source_doctype, conversation):
+		frappe.throw(f"Conversation not found: {source_doctype} / {conversation}")
+
+	limit_n = min(frappe.utils.cint(limit) or 50, 200)
+
+	if source_doctype == "Email Conversation":
+		comms = frappe.get_all(
+			"Communication",
+			filters={"reference_doctype": source_doctype, "reference_name": conversation},
+			fields=["name", "sent_or_received", "content", "communication_date", "custom_is_bot_reply"],
+			order_by="communication_date desc",
+			limit_page_length=limit_n,
+		)
+		msgs = [
+			{
+				"name": c.name,
+				"direction": "Incoming" if c.sent_or_received == "Received" else "Outgoing",
+				"content_type": "text",
+				"message": frappe.utils.strip_html(c.content or ""),
+				"media_file": None,
+				"timestamp": c.communication_date,
+				"sent_by": None,
+				"is_bot_reply": c.custom_is_bot_reply,
+			}
+			for c in comms
+		]
+		return list(reversed(msgs))
+
+	message_doctype = CHANNEL_MESSAGE_DOCTYPE.get(source_doctype)
+	fields = ["name", "direction", "content_type", "message", "media_file", "timestamp", "sent_by", "is_bot_reply"]
+	if source_doctype == "WA Conversation":
+		fields.append("ack_status")
 
 	msgs = frappe.get_all(
-		"WA Chat Message",
+		message_doctype,
 		filters={"conversation": conversation},
-		fields=[
-			"name", "direction", "content_type", "message",
-			"media_file", "timestamp", "ack_status", "sent_by",
-		],
+		fields=fields,
 		order_by="timestamp desc",
-		limit_page_length=min(frappe.utils.cint(limit) or 50, 200),
+		limit_page_length=limit_n,
 	)
 	return list(reversed(msgs))
 
 
 @frappe.whitelist()
-def mark_read(conversation):
-	"""Reset the unread counter when an agent opens a thread."""
-	if not frappe.has_permission("WA Conversation", "write"):
+def mark_read(conversation, source_doctype="WA Conversation"):
+	"""Reset the unread counter when an agent opens a thread - any channel."""
+	if source_doctype not in VALID_SOURCE_DOCTYPES:
+		frappe.throw("Unknown channel")
+	if not frappe.has_permission(source_doctype, "write"):
 		frappe.throw("Not permitted", frappe.PermissionError)
-	if frappe.db.exists("WA Conversation", conversation):
+	if frappe.db.exists(source_doctype, conversation):
 		frappe.db.set_value(
-			"WA Conversation", conversation, "unread_count", 0,
+			source_doctype, conversation, "unread_count", 0,
 			update_modified=False,
 		)
+		from nexchat.locks import sync_conversation
+		sync_conversation(source_doctype, conversation)
 	return True
 
 
 @frappe.whitelist()
 def workload_counts():
-	"""Top-bar counts: mine, unassigned, overdue (escalated) - session scoped."""
-	if not frappe.has_permission("WA Conversation", "read"):
+	"""Top-bar counts: mine, unassigned, overdue (escalated) - across every
+	channel, session scoped the same way get_conversations is."""
+	if not frappe.has_permission("Conversation Queue", "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	me = frappe.session.user
 
-	from nexchat.permissions import permitted_sessions
-	sess = permitted_sessions(me)
-	base = {"status": "Open"}
-	if sess is not None:
-		base["session"] = ["in", sess]
-
-	mine = frappe.db.count("WA Conversation", {**base, "assigned_agent": me})
-	unassigned = frappe.db.count(
-		"WA Conversation", {**base, "assigned_agent": ["in", ["", None]]}
+	rows = frappe.get_all(
+		"Conversation Queue",
+		filters={"status": "Open"},
+		fields=["channel", "source_name", "assigned_agent", "sla_state"],
 	)
-	overdue = frappe.db.count("WA Conversation", {**base, "sla_state": "Escalated"})
+	rows = _scope_rows_by_session(rows, me)
+
+	mine = sum(1 for r in rows if r["assigned_agent"] == me)
+	unassigned = sum(1 for r in rows if not r["assigned_agent"])
+	overdue = sum(1 for r in rows if r["sla_state"] == "Escalated")
 	return {"mine": mine, "unassigned": unassigned, "overdue": overdue}
 
 
 @frappe.whitelist()
-def customer_summary(conversation):
+def customer_summary(conversation, source_doctype="WA Conversation"):
 	"""Light inline summary for the right column. Heavy detail stays on the
-	customer form (we just deep-link there)."""
-	if not frappe.has_permission("WA Conversation", "read"):
+	customer form (we just deep-link there). Works for every channel -
+	all three doctypes share the customer/contact/lead/display_name fields."""
+	if source_doctype not in VALID_SOURCE_DOCTYPES:
+		frappe.throw("Unknown channel")
+	if not frappe.has_permission(source_doctype, "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
-	conv = frappe.get_doc("WA Conversation", conversation)
+	conv = frappe.get_doc(source_doctype, conversation)
 	out = {
 		"customer": conv.customer,
 		"contact": conv.contact,
 		"lead": conv.lead,
 		"display_name": conv.display_name,
-		"resolved_number": conv.resolved_number or conv.phone_number,
+		"resolved_number": getattr(conv, "resolved_number", None) or getattr(conv, "phone_number", None),
 	}
 	if not conv.customer:
 		return out

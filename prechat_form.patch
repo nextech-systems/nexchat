@@ -1,0 +1,437 @@
+diff --git a/nexchat/api.py b/nexchat/api.py
+index cdfb87b..ec9df4a 100644
+--- a/nexchat/api.py
++++ b/nexchat/api.py
+@@ -257,88 +257,134 @@ def normalize_number(number):
+ 	return digits
+ 
+ 
++def _scope_rows_by_session(rows, user):
++	"""Session-based read scoping only meaningfully applies to WhatsApp
++	(Website has no gateway-session concept). Conversation Queue doesn't
++	carry session itself, so this is enforced in Python against the WA
++	rows only - Website rows always pass through untouched."""
++	from nexchat.permissions import permitted_sessions
++	sess = permitted_sessions(user)
++	if sess is None:
++		return rows
++	wa_allowed = set(
++		frappe.get_all("WA Conversation", filters={"session": ["in", sess]}, pluck="name")
++	)
++	return [r for r in rows if r.get("channel") != "WhatsApp" or r.get("source_name") in wa_allowed]
++
++
+ @frappe.whitelist()
+ def get_conversations(search=None, tab="all"):
+-	"""Conversation list for the chat center, newest activity first."""
+-	if not frappe.has_permission("WA Conversation", "read"):
++	"""Unified conversation list for the chat center across every channel
++	(WhatsApp + Website), newest activity first. Backed by Conversation
++	Queue, a read-only mirror kept in sync by each channel's own handler -
++	each channel's own doctype (WA Conversation / Web Conversation) stays
++	the real source of truth for locking, CRM links and messages."""
++	if not frappe.has_permission("Conversation Queue", "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 
+ 	filters = {}
+ 	or_filters = None
+-
+-	from nexchat.permissions import permitted_sessions
+-	sess = permitted_sessions(frappe.session.user)
+-	if sess is not None:
+-		filters["session"] = ["in", sess]
++	me = frappe.session.user
+ 
+ 	if search:
+ 		search = f"%{search}%"
+ 		or_filters = [
+-			["phone_number", "like", search],
+ 			["display_name", "like", search],
+ 			["customer", "like", search],
++			["source_name", "like", search],
+ 		]
+-	me = frappe.session.user
+ 	if tab == "mine":
+ 		filters["assigned_agent"] = me
+ 	elif tab == "unassigned":
+ 		filters["assigned_agent"] = ["in", ["", None]]
+-	# "all" applies no assignment filter (still session-scoped above)
++	# "all" applies no assignment filter
+ 
+-	convs = frappe.get_all(
+-		"WA Conversation",
++	rows = frappe.get_all(
++		"Conversation Queue",
+ 		filters=filters,
+ 		or_filters=or_filters,
+ 		fields=[
+-			"name", "display_name", "status", "unread_count",
+-			"last_message_preview", "modified", "customer",
+-			"contact", "lead", "assigned_agent", "resolved_number", "session",
+-			"last_agent", "claimed_at", "sla_state",
+-			"last_incoming_at", "last_outgoing_at",
++			"channel", "source_doctype", "source_name", "display_name",
++			"status", "unread_count", "last_message_preview", "modified",
++			"customer", "contact", "lead", "assigned_agent", "last_agent",
++			"sla_state", "last_incoming_at", "last_outgoing_at",
+ 		],
+ 		order_by="modified desc",
+ 		limit_page_length=200,
+ 	)
+-	# sticky highlight: returning customers whose last agent is me
+-	for c in convs:
+-		c["sticky_mine"] = bool(
+-			not c.get("assigned_agent") and c.get("last_agent") == me
+-		)
+-		c["waiting"] = bool(
+-			c.get("last_incoming_at")
+-			and (not c.get("last_outgoing_at") or c["last_outgoing_at"] < c["last_incoming_at"])
+-		)
+-	labels = {
++	rows = _scope_rows_by_session(rows, me)
++
++	# WhatsApp-only extras the frontend already displays: resolved_number
++	# and the session label. Website rows leave these blank.
++	wa_names = [r["source_name"] for r in rows if r["channel"] == "WhatsApp"]
++	wa_extra = {}
++	if wa_names:
++		wa_extra = {
++			w.name: w
++			for w in frappe.get_all(
++				"WA Conversation",
++				filters={"name": ["in", wa_names]},
++				fields=["name", "resolved_number", "phone_number", "session"],
++			)
++		}
++	session_labels = {
+ 		s.name: s.session_label
+ 		for s in frappe.get_all("NexChat Session", fields=["name", "session_label"])
+ 	}
+ 	agent_names = {}
+-	for c in convs:
+-		c["session_label"] = labels.get(c.get("session")) or ""
++
++	convs = []
++	for r in rows:
++		c = dict(r)
++		# keep "name" as the identifier the frontend already sends back on
++		# every follow-up call (load_messages, send, lock_action, ...)
++		c["name"] = r["source_name"]
++		extra = wa_extra.get(r["source_name"], {})
++		c["resolved_number"] = extra.get("resolved_number") or extra.get("phone_number")
++		c["session_label"] = session_labels.get(extra.get("session")) or ""
++
++		c["sticky_mine"] = bool(not c.get("assigned_agent") and c.get("last_agent") == me)
++		c["waiting"] = bool(
++			c.get("last_incoming_at")
++			and (not c.get("last_outgoing_at") or c["last_outgoing_at"] < c["last_incoming_at"])
++		)
+ 		if c.get("assigned_agent") and c["assigned_agent"] not in agent_names:
+ 			agent_names[c["assigned_agent"]] = frappe.get_cached_value(
+ 				"User", c["assigned_agent"], "full_name"
+ 			) or c["assigned_agent"]
+ 		c["assigned_agent_name"] = agent_names.get(c.get("assigned_agent"), "")
++		convs.append(c)
++
+ 	convs.sort(key=lambda c: (not c["sticky_mine"], not c["waiting"]))
+ 	return convs
+ 
+ 
++CHANNEL_MESSAGE_DOCTYPE = {
++	"WA Conversation": "WA Chat Message",
++	"Web Conversation": "Web Chat Message",
++}
++
++
+ @frappe.whitelist()
+-def get_messages(conversation, limit=50):
+-	"""Last N messages of a conversation, oldest first."""
+-	if not frappe.has_permission("WA Conversation", "read"):
++def get_messages(conversation, source_doctype="WA Conversation", limit=50):
++	"""Last N messages of a conversation, oldest first. Works for either
++	channel - source_doctype picks which pair of doctypes to query."""
++	message_doctype = CHANNEL_MESSAGE_DOCTYPE.get(source_doctype)
++	if not message_doctype:
++		frappe.throw("Unknown channel")
++	if not frappe.has_permission(source_doctype, "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+-	if not frappe.db.exists("WA Conversation", conversation):
++	if not frappe.db.exists(source_doctype, conversation):
+ 		frappe.throw(f"Conversation not found: {source_doctype} / {conversation}")
+ 
++	fields = ["name", "direction", "content_type", "message", "media_file", "timestamp", "sent_by"]
++	if source_doctype == "WA Conversation":
++		fields.append("ack_status")
++
+ 	msgs = frappe.get_all(
+-		"WA Chat Message",
++		message_doctype,
+ 		filters={"conversation": conversation},
+-		fields=[
+-			"name", "direction", "content_type", "message",
+-			"media_file", "timestamp", "ack_status", "sent_by",
+-		],
++		fields=fields,
+ 		order_by="timestamp desc",
+ 		limit_page_length=min(frappe.utils.cint(limit) or 50, 200),
+ 	)
+@@ -346,52 +392,61 @@ def get_messages(conversation, limit=50):
+ 
+ 
+ @frappe.whitelist()
+-def mark_read(conversation):
+-	"""Reset the unread counter when an agent opens a thread."""
+-	if not frappe.has_permission("WA Conversation", "write"):
++def mark_read(conversation, source_doctype="WA Conversation"):
++	"""Reset the unread counter when an agent opens a thread - either channel."""
++	if source_doctype not in CHANNEL_MESSAGE_DOCTYPE:
++		frappe.throw("Unknown channel")
++	if not frappe.has_permission(source_doctype, "write"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+-	if frappe.db.exists("WA Conversation", conversation):
++	if frappe.db.exists(source_doctype, conversation):
+ 		frappe.db.set_value(
+-			"WA Conversation", conversation, "unread_count", 0,
++			source_doctype, conversation, "unread_count", 0,
+ 			update_modified=False,
+ 		)
++		from nexchat.locks import sync_conversation
++		sync_conversation(source_doctype, conversation)
+ 	return True
+ 
+ 
+ @frappe.whitelist()
+ def workload_counts():
+-	"""Top-bar counts: mine, unassigned, overdue (escalated) - session scoped."""
+-	if not frappe.has_permission("WA Conversation", "read"):
++	"""Top-bar counts: mine, unassigned, overdue (escalated) - across every
++	channel, session scoped the same way get_conversations is."""
++	if not frappe.has_permission("Conversation Queue", "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+ 	me = frappe.session.user
+ 
+-	from nexchat.permissions import permitted_sessions
+-	sess = permitted_sessions(me)
+-	base = {"status": "Open"}
+-	if sess is not None:
+-		base["session"] = ["in", sess]
+-
+-	mine = frappe.db.count("WA Conversation", {**base, "assigned_agent": me})
+-	unassigned = frappe.db.count(
+-		"WA Conversation", {**base, "assigned_agent": ["in", ["", None]]}
++	rows = frappe.get_all(
++		"Conversation Queue",
++		filters={"status": "Open"},
++		fields=["channel", "source_name", "assigned_agent", "sla_state"],
+ 	)
+-	overdue = frappe.db.count("WA Conversation", {**base, "sla_state": "Escalated"})
++	rows = _scope_rows_by_session(rows, me)
++
++	mine = sum(1 for r in rows if r["assigned_agent"] == me)
++	unassigned = sum(1 for r in rows if not r["assigned_agent"])
++	overdue = sum(1 for r in rows if r["sla_state"] == "Escalated")
+ 	return {"mine": mine, "unassigned": unassigned, "overdue": overdue}
+ 
+ 
+ @frappe.whitelist()
+-def customer_summary(conversation):
++def customer_summary(conversation, source_doctype="WA Conversation"):
+ 	"""Light inline summary for the right column. Heavy detail stays on the
+-	customer form (we just deep-link there)."""
+-	if not frappe.has_permission("WA Conversation", "read"):
++	customer form (we just deep-link there). Works for either channel -
++	both doctypes share the customer/contact/lead/display_name fields."""
++	if source_doctype not in CHANNEL_MESSAGE_DOCTYPE:
++		frappe.throw("Unknown channel")
++	if not frappe.has_permission(source_doctype, "read"):
+ 		frappe.throw("Not permitted", frappe.PermissionError)
+-	conv = frappe.get_doc("WA Conversation", conversation)
++	conv = frappe.get_doc(source_doctype, conversation)
+ 	out = {
+ 		"customer": conv.customer,
+ 		"contact": conv.contact,
+ 		"lead": conv.lead,
+ 		"display_name": conv.display_name,
+-		"resolved_number": conv.resolved_number or conv.phone_number,
++		"resolved_number": getattr(conv, "resolved_number", None) or getattr(conv, "phone_number", None),
++		"email": getattr(conv, "email", None),
++		"phone": getattr(conv, "phone", None),
+ 	}
+ 	if not conv.customer:
+ 		return out
+diff --git a/nexchat/nexchat/doctype/web_conversation/web_conversation.json b/nexchat/nexchat/doctype/web_conversation/web_conversation.json
+index f43e9bf..970640c 100644
+--- a/nexchat/nexchat/doctype/web_conversation/web_conversation.json
++++ b/nexchat/nexchat/doctype/web_conversation/web_conversation.json
+@@ -9,6 +9,7 @@
+   "visitor_id",
+   "display_name",
+   "email",
++  "phone",
+   "page_url",
+   "conv_column_a",
+   "status",
+@@ -56,6 +57,14 @@
+    "in_standard_filter": 1,
+    "description": "Set if the visitor gives an email in the widget - primary CRM matching key for this channel"
+   },
++  {
++   "fieldname": "phone",
++   "fieldtype": "Data",
++   "label": "Phone",
++   "options": "Phone",
++   "in_standard_filter": 1,
++   "description": "Set if the visitor gives a phone number in the widget"
++  },
+   {
+    "fieldname": "page_url",
+    "fieldtype": "Data",
+diff --git a/nexchat/nexchat/page/nexchat_center/nexchat_center.js b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+index f61f020..4b4e27f 100644
+--- a/nexchat/nexchat/page/nexchat_center/nexchat_center.js
++++ b/nexchat/nexchat/page/nexchat_center/nexchat_center.js
+@@ -172,7 +172,9 @@ class NexChatCenter {
+ 			const cls = (this.active && this.active.name === c.name) ? "active" : (c.sticky_mine ? "sticky" : "");
+ 			const name = esc(c.display_name || c.name);
+ 			const sub = c.customer ? esc(c.customer) : (c.lead ? __("Lead") : (c.sticky_mine ? __("Returning - yours") : __("Unlinked")));
+-			const chip = multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "";
++			const channel_color = c.channel === "Website" ? "var(--blue-100,#d8e6fd)" : "var(--green-100,#d4f5dd)";
++			const channel_chip = ` <span class="nxc-chip" style="background:${channel_color}">${esc(c.channel || "")}</span>`;
++			const chip = (multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "") + channel_chip;
+ 			const badge = c.unread_count ? `<span class="nxc-badge">${c.unread_count}</span>` : "";
+ 			const clock = (c.waiting && c.sla_state === "Escalated") ? `<span class="nxc-clock">overdue</span>`
+ 				: (c.waiting && c.sla_state === "Reminded") ? `<span class="nxc-clock">waiting</span>` : "";
+@@ -222,16 +224,21 @@ class NexChatCenter {
+ 			this.$thread.find(".nxc-send").on("click", () => this.send());
+ 			this.$input.on("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send(); }});
+ 		}
+-		this.$thread.find(".nxc-release").on("click", () => this.lock_action("release", c.name));
+-		this.$thread.find(".nxc-takeover").on("click", () => this.lock_action("take_over", c.name));
++		this.$thread.find(".nxc-release").on("click", () => this.lock_action("release", c.name, c.source_doctype));
++		this.$thread.find(".nxc-takeover").on("click", () => this.lock_action("take_over", c.name, c.source_doctype));
+ 	}
+ 
+-	lock_action(action, name) {
+-		frappe.call({ method: `nexchat.locks.${action}`, args: { conversation: name }, callback: () => this.load_conversations() });
++	lock_action(action, name, source_doctype) {
++		frappe.call({
++			method: `nexchat.locks.${action}`,
++			args: { conversation: name, doctype: source_doctype || "WA Conversation" },
++			callback: () => this.load_conversations(),
++		});
+ 	}
+ 
+ 	load_messages(name) {
+-		frappe.call({ method: "nexchat.api.get_messages", args: { conversation: name, limit: 50 }, callback: (r) => {
++		const source_doctype = (this.active && this.active.name === name) ? this.active.source_doctype : "WA Conversation";
++		frappe.call({ method: "nexchat.api.get_messages", args: { conversation: name, source_doctype, limit: 50 }, callback: (r) => {
+ 			if (!this.active || this.active.name !== name || !this.$msgs) return;
+ 			const esc = frappe.utils.escape_html;
+ 			this.$msgs.empty();
+@@ -252,8 +259,14 @@ class NexChatCenter {
+ 		if (!text) return;
+ 		this.sending = true;
+ 		const $b = this.$thread.find(".nxc-send").prop("disabled", true);
++		// Each channel has its own send path (WhatsApp goes through the
++		// OpenWA gateway, Website just writes a Web Chat Message directly) -
++		// same args shape either way, just a different method.
++		const method = this.active.source_doctype === "Web Conversation"
++			? "nexchat.website.send_reply"
++			: "nexchat.api.send_message";
+ 		frappe.call({
+-			method: "nexchat.api.send_message",
++			method,
+ 			args: { conversation: this.active.name, message: text },
+ 			callback: () => { this.$input.val(""); this.load_messages(this.active.name); this.refresh_all(true); },
+ 			always: () => { this.sending = false; $b.prop("disabled", false); this.$input.focus(); },
+@@ -261,11 +274,12 @@ class NexChatCenter {
+ 	}
+ 
+ 	mark_read(name) {
+-		frappe.call({ method: "nexchat.api.mark_read", args: { conversation: name }, callback: () => this.refresh_all(true) });
++		const source_doctype = (this.active && this.active.name === name) ? this.active.source_doctype : "WA Conversation";
++		frappe.call({ method: "nexchat.api.mark_read", args: { conversation: name, source_doctype }, callback: () => this.refresh_all(true) });
+ 	}
+ 
+ 	load_customer(c) {
+-		frappe.call({ method: "nexchat.api.customer_summary", args: { conversation: c.name }, callback: (r) => {
++		frappe.call({ method: "nexchat.api.customer_summary", args: { conversation: c.name, source_doctype: c.source_doctype }, callback: (r) => {
+ 			if (!this.active || this.active.name !== c.name) return;
+ 			this.render_customer(r.message || {});
+ 		}});
+@@ -275,9 +289,11 @@ class NexChatCenter {
+ 		const esc = frappe.utils.escape_html;
+ 		const fmt = (v) => v == null ? "—" : format_currency(v, frappe.defaults.get_default("currency"));
+ 		if (!s.customer) {
++			const contact_lines = [s.email, s.phone].filter(Boolean).map(esc).join(" · ");
+ 			this.$cust.html(`
+ 				<div style="text-align:center;padding-top:10px">
+ 					<div style="font-size:13px;font-weight:600">${esc(s.display_name || s.resolved_number || "")}</div>
++					${contact_lines ? `<div class="nxc-sub">${contact_lines}</div>` : ""}
+ 					<div class="nxc-sub">${s.lead ? __("Lead: {0}", [esc(s.lead)]) : __("Not linked to a customer")}</div>
+ 				</div>
+ 				<button class="btn btn-default btn-xs nxc-link">${__("Link")}</button>
+diff --git a/nexchat/website.py b/nexchat/website.py
+index bfe8a1f..d74daa9 100644
+--- a/nexchat/website.py
++++ b/nexchat/website.py
+@@ -31,14 +31,26 @@ RATE_LIMIT_PER_MINUTE = 20
+ 
+ 
+ @frappe.whitelist(allow_guest=True, methods=["POST"])
+-def start_conversation(page_url=None):
++def start_conversation(page_url=None, display_name=None, email=None, phone=None):
+ 	"""Mint a new visitor_id and Web Conversation. Call this once per
+-	visitor (widget checks its cookie first and only calls this if empty)."""
++	visitor (widget checks its cookie first and only calls this if empty).
++	Pre-chat details are required by policy - the widget's own form
++	enforces this, but we also validate here since client-side checks
++	alone can't be trusted for a guest-facing endpoint."""
++	display_name = (display_name or "").strip()
++	email = (email or "").strip()
++	phone = (phone or "").strip()
++	if not display_name or not email or not phone:
++		frappe.throw("Name, email, and phone are all required to start a chat")
++
+ 	visitor_id = frappe.generate_hash(length=32)
+ 	frappe.get_doc(
+ 		{
+ 			"doctype": DOCTYPE,
+ 			"visitor_id": visitor_id,
++			"display_name": display_name[:140],
++			"email": email[:140],
++			"phone": phone[:40],
+ 			"page_url": (page_url or "")[:255],
+ 			"status": "Open",
+ 		}
+@@ -48,15 +60,18 @@ def start_conversation(page_url=None):
+ 
+ 
+ @frappe.whitelist(allow_guest=True, methods=["POST"])
+-def identify(visitor_id, display_name=None, email=None):
+-	"""Optional: widget calls this if the visitor gives a name/email
+-	(e.g. a pre-chat form). Not required to start chatting."""
++def identify(visitor_id, display_name=None, email=None, phone=None):
++	"""Kept for compatibility / edge cases - normal flow now captures all
++	three fields up front in start_conversation(). Still useful if an
++	older conversation is missing one of these and needs a top-up."""
+ 	conv = _get_conversation(visitor_id)
+ 	updates = {}
+ 	if display_name:
+ 		updates["display_name"] = display_name[:140]
+ 	if email:
+ 		updates["email"] = email[:140]
++	if phone:
++		updates["phone"] = phone[:40]
+ 	if updates:
+ 		conv.db_set(updates, update_modified=False)
+ 		sync_conversation(DOCTYPE, conv.name)
+@@ -69,6 +84,8 @@ def send_from_widget(visitor_id, message, page_url=None):
+ 	token, message is free text from an anonymous source, so treat both
+ 	as untrusted input."""
+ 	conv = _get_conversation(visitor_id)
++	if not (conv.display_name and conv.email and conv.phone):
++		frappe.throw("Please provide your name, email, and phone before chatting")
+ 	message = (message or "").strip()
+ 	if not message:
+ 		frappe.throw("Message is empty")

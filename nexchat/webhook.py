@@ -188,6 +188,16 @@ def _handle_message(event_type, data):
 	conversation.db_set(updates, update_modified=True)
 	sync_conversation("WA Conversation", conversation.name)
 
+	if incoming:
+		frappe.enqueue(
+			"nexchat.ai_reply.maybe_auto_reply",
+			source_doctype="WA Conversation",
+			conversation_name=conversation.name,
+			message_text=body,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+
 	frappe.publish_realtime(
 		"nexchat_message",
 		{

@@ -116,13 +116,16 @@ app_license = "MIT"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+        "Communication": {
+                "after_insert": "nexchat.email_channel.on_communication_insert",
+        },
+        "Quotation": {
+                "before_validate": "nexchat.quotation_events.before_validate_quotation",
+                "after_insert": "nexchat.quotation_events.on_quotation_update",
+                "on_update": "nexchat.quotation_events.on_quotation_update",
+        },
+}
 
 # Scheduled Tasks
 # ---------------
