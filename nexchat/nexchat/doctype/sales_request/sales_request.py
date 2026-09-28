@@ -725,3 +725,25 @@ def set_sales_request_customer(
     doc.save()
 
     return _format_sales_request(doc)
+
+
+@frappe.whitelist()
+def set_call_transcript(sales_request=None, transcript=None):
+    """Store the phone call transcript on a Sales Request (TARS)."""
+    _require_voice_agent_role()
+
+    if not sales_request or not frappe.db.exists("Sales Request", sales_request):
+        frappe.throw(_("Sales Request not found."), frappe.ValidationError)
+
+    text = (transcript or "")[:60000]
+
+    frappe.db.set_value(
+        "Sales Request",
+        sales_request,
+        "call_transcript",
+        text,
+        update_modified=False,
+    )
+
+    return {"name": sales_request, "chars": len(text)}
+

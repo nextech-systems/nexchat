@@ -1,0 +1,120 @@
+{
+ "autoname": "naming_series:",
+ "custom": 0,
+ "doctype": "DocType",
+ "fields": [
+  {
+   "default": "SAL-REQ-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "SAL-REQ-.YYYY.-.#####",
+   "reqd": 1
+  },
+  {
+   "default": "New",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "New\nIn Progress\nWaiting on Rep\nQuote Ready\nCompleted\nCancelled",
+   "reqd": 1
+  },
+  {
+   "default": "Normal",
+   "fieldname": "priority",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Priority",
+   "options": "Low\nNormal\nHigh\nUrgent"
+  },
+  {
+   "fieldname": "assigned_to",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Assigned To",
+   "options": "User"
+  },
+  {
+   "default": "Manual",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Source",
+   "options": "Manual\nAI Voice\nPBX\nWhatsApp",
+   "reqd": 1
+  },
+  {
+   "fieldname": "rep_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Rep Code",
+   "options": "AI Sales Rep",
+   "reqd": 0
+  },
+  {
+   "fieldname": "rep_name",
+   "fieldtype": "Data",
+   "label": "Rep Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sales_person",
+   "fieldtype": "Link",
+   "label": "Sales Person",
+   "options": "Sales Person",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "request_text",
+   "fieldtype": "Small Text",
+   "label": "Request Text"
+  },
+  {
+   "fieldname": "quotation",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Draft Quotation",
+   "options": "Quotation"
+  },
+  {
+   "fieldname": "quote_ready_at",
+   "fieldtype": "Datetime",
+   "label": "Quote Ready At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At",
+   "read_only": 1
+  }
+ ],
+ "is_submittable": 0,
+ "modified": "2026-09-25 17:48:07.814989",
+ "module": "NexChat",
+ "name": "Sales Request",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Voice Agent API",
+   "write": 1
+  }
+ ],
+ "track_changes": 1
+}
