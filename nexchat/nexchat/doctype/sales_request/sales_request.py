@@ -406,6 +406,7 @@ def _format_sales_request(doc):
         "assigned_to_name": assigned_to_name,
         "customer": doc.customer,
         "request_text": doc.request_text,
+        "call_transcript": doc.get("call_transcript"),
         "quotation": doc.quotation,
         "quote_ready_at": doc.quote_ready_at,
         "completed_at": doc.completed_at,

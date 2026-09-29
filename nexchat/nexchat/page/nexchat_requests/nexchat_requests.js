@@ -375,6 +375,12 @@ class NexChatSalesRequestHub {
                 </div>
 
                 ${
+                    row.call_transcript
+                        ? `<div class="nxr-meta">&#9742; ${__("Call transcript")}</div>`
+                        : ""
+                }
+
+                ${
                     quotation
                         ? `<div class="nxr-quotation">${__("Draft Quote")}: ${esc(quotation)}</div>`
                         : ""
@@ -484,6 +490,21 @@ class NexChatSalesRequestHub {
                     fieldtype: "Small Text",
                     default: row.request_text || "",
                     read_only: 1,
+                },
+                {
+                    fieldtype: "Section Break",
+                    label: __("Call Transcript"),
+                    collapsible: 1,
+                },
+                {
+                    fieldname: "call_transcript_html",
+                    fieldtype: "HTML",
+                    options: row.call_transcript
+                        ? `<pre style="white-space: pre-wrap; max-height: 320px; overflow-y: auto; font-size: 12px; margin: 0;">${esc(row.call_transcript)}</pre>`
+                        : `<div class="text-muted">${__("No call transcript for this request.")}</div>`,
+                },
+                {
+                    fieldtype: "Section Break",
                 },
                 {
                     fieldname: "rep_name",
