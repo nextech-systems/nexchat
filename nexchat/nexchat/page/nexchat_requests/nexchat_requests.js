@@ -500,7 +500,7 @@ class NexChatSalesRequestHub {
                     fieldname: "call_transcript_html",
                     fieldtype: "HTML",
                     options: row.call_transcript
-                        ? `<pre style="white-space: pre-wrap; max-height: 320px; overflow-y: auto; font-size: 12px; margin: 0;">${esc(row.call_transcript)}</pre>`
+                        ? `<pre style="white-space: pre-wrap; max-height: 320px; overflow-y: auto; font-size: 12px; margin: 0;">${frappe.utils.escape_html(row.call_transcript)}</pre>`
                         : `<div class="text-muted">${__("No call transcript for this request.")}</div>`,
                 },
                 {
