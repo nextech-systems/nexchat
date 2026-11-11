@@ -7,3 +7,8 @@ nexchat/docs/current
 node_modules/*.bak.*
 *.orig
 *.rej
+*.bak
+*.bak.*
+*.old
+*.rej
+*.orig
