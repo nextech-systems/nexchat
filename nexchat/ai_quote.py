@@ -229,7 +229,17 @@ def _resolve_sales_person(rep_code):
     }
 
 
-def _sales_team_from_customer(customer):
+def _validate_lead(lead):
+    if not lead or not frappe.db.exists("Lead", lead):
+        frappe.throw(_("Lead {0} does not exist.").format(frappe.bold(lead or "")),
+                     frappe.ValidationError)
+    status = frappe.db.get_value("Lead", lead, "status")
+    if status in ("Converted", "Do Not Contact"):
+        frappe.throw(_("Lead {0} is {1} and cannot be quoted.").format(frappe.bold(lead), status),
+                     frappe.ValidationError)
+
+
+def _sales_team_from_customer(customer, doctype="Customer"):
     """
     The quotation's sales team ALWAYS comes from the Customer record.
     The rep is never dictated by the requester (phone, WhatsApp, manual).
@@ -237,7 +247,7 @@ def _sales_team_from_customer(customer):
     rows = frappe.get_all(
         "Sales Team",
         filters={
-            "parenttype": "Customer",
+            "parenttype": doctype,
             "parent": customer,
         },
         fields=["sales_person", "allocated_percentage", "idx"],
@@ -266,8 +276,8 @@ def _sales_team_from_customer(customer):
 
     if not team:
         frappe.throw(
-            _("Customer {0} has no active sales rep assigned. Please contact the office.").format(
-                frappe.bold(customer)
+            _("{1} {0} has no active sales rep assigned. Please contact the office.").format(
+                frappe.bold(customer), _(doctype)
             ),
             frappe.ValidationError,
         )
@@ -329,11 +339,17 @@ def create_draft_quotation(payload=None):
         or {}
     ).get("name")
 
-    _validate_customer(customer)
+    party_type = payload.get("party_type") or "Customer"
+    if party_type not in ("Customer", "Lead"):
+        frappe.throw(_("Invalid party type {0}.").format(party_type), frappe.ValidationError)
+    if party_type == "Lead":
+        _validate_lead(customer)
+    else:
+        _validate_customer(customer)
 
     # The rep always comes from the customer record.
     # Any rep_code in the payload is ignored.
-    sales_team = _sales_team_from_customer(customer)
+    sales_team = _sales_team_from_customer(customer, party_type)
 
     incoming_items = payload.get("items") or []
 
@@ -356,7 +372,7 @@ def create_draft_quotation(payload=None):
     doc = frappe.get_doc(
         {
             "doctype": "Quotation",
-            "quotation_to": "Customer",
+            "quotation_to": party_type,
             "party_name": customer,
             "company": COMPANY,
             "selling_price_list": PRICE_LIST,

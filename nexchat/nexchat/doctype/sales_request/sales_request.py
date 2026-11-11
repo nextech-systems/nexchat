@@ -193,6 +193,7 @@ def create_sales_request(
     source="AI Voice",
     request_text=None,
     rep_code=None,
+    lead=None,
 ):
     """
     Create a Sales Request.
@@ -202,13 +203,17 @@ def create_sales_request(
     """
     _require_voice_agent_role()
 
-    from nexchat.ai_quote import _sales_team_from_customer, _validate_customer
+    from nexchat.ai_quote import _sales_team_from_customer, _validate_customer, _validate_lead
 
     customer = (customer or "").strip()
+    lead = (lead or "").strip()
 
-    _validate_customer(customer)
-
-    sales_team = _sales_team_from_customer(customer)
+    if lead:
+        _validate_lead(lead)
+        sales_team = _sales_team_from_customer(lead, "Lead")
+    else:
+        _validate_customer(customer)
+        sales_team = _sales_team_from_customer(customer)
 
     primary = max(
         sales_team,
@@ -218,7 +223,8 @@ def create_sales_request(
     doc = frappe.get_doc({
         "doctype": "Sales Request",
         "source": source or "AI Voice",
-        "customer": customer,
+        "customer": customer or None,
+        "lead": lead or None,
         "sales_person": primary["sales_person"],
         "rep_name": primary["sales_person"],
         "request_text": request_text,
@@ -351,7 +357,10 @@ def _link_draft_quotation_internal(
         )
 
     doc.quotation = quotation
-    doc.customer = quotation_customer
+    if frappe.db.get_value("Quotation", quotation, "quotation_to") == "Lead":
+        doc.lead = quotation_customer
+    else:
+        doc.customer = quotation_customer
     doc.status = "Quote Ready"
 
     if not doc.quote_ready_at:
@@ -405,6 +414,7 @@ def _format_sales_request(doc):
         "assigned_to": doc.assigned_to,
         "assigned_to_name": assigned_to_name,
         "customer": doc.customer,
+        "lead": doc.get("lead"),
         "request_text": doc.request_text,
         "call_transcript": doc.get("call_transcript"),
         "quotation": doc.quotation,
