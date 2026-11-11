@@ -1,4 +1,4 @@
-// Sales Request board - shared by NexChat (Requests view) and /app/nexchat-requests
+// Sales Request board - used by the NexChat page (Requests view)
 window.NexChatSalesRequestHub = window.NexChatSalesRequestHub || class {
     constructor($root) {
         this.$root = $root;
