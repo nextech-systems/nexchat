@@ -341,7 +341,7 @@ class NexChatSalesRequestHub {
             row.priority || "Normal"
         ).toLowerCase().replaceAll(" ", "-");
 
-        const customer = row.customer || __("Customer not resolved");
+        const customer = row.customer || (row.lead ? __("Lead: {0}", [row.lead_name || row.lead]) : __("Customer not resolved"));
         const assigned =
             row.assigned_to_name
             || row.assigned_to
@@ -375,7 +375,7 @@ class NexChatSalesRequestHub {
                 </div>
 
                 ${
-                    row.call_transcript
+                    (row.has_transcript || row.call_transcript)
                         ? `<div class="nxr-meta">&#9742; ${__("Call transcript")}</div>`
                         : ""
                 }
@@ -590,6 +590,21 @@ class NexChatSalesRequestHub {
                     }
                 </div>
             `);
+        } else if (row.lead) {
+            $customer_section.html(`
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--border-color);border-radius:8px;margin-bottom:12px;">
+                    <div>
+                        <div class="text-muted" style="font-size:11px">${__("Lead")}</div>
+                        <div style="font-weight:600" class="nxr-lead-name">${frappe.utils.escape_html(row.lead)}</div>
+                    </div>
+                    <button type="button" class="btn btn-default btn-xs nxr-open-lead">${__("Open Lead")}</button>
+                </div>
+            `);
+            frappe.db.get_value("Lead", row.lead, "lead_name").then((r) => {
+                const nm = r && r.message && r.message.lead_name;
+                if (nm) $customer_section.find(".nxr-lead-name").text(nm + " (" + row.lead + ")");
+            });
+            $customer_section.find(".nxr-open-lead").on("click", () => frappe.set_route("Form", "Lead", row.lead));
         } else {
             $customer_section.html(`
                 <div style="
@@ -708,7 +723,8 @@ class NexChatSalesRequestHub {
                 __("Create Quotation"),
                 () => {
                     const sales_request = row.name;
-                    const customer = row.customer || "";
+                    const customer = row.customer || row.lead || "";
+                    const party_type = row.customer ? "Customer" : "Lead";
 
                     dialog.hide();
 
@@ -731,7 +747,7 @@ class NexChatSalesRequestHub {
                             if (customer) {
                                 frm.set_value(
                                     "quotation_to",
-                                    "Customer"
+                                    party_type
                                 ).then(() => {
                                     frm.set_value(
                                         "party_name",

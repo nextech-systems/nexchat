@@ -466,6 +466,9 @@ def get_sales_requests(
             "assigned_to",
             "customer",
             "quotation",
+            "lead",
+            "request_text",
+            "call_transcript",
             "quote_ready_at",
             "completed_at",
             "creation",
@@ -475,15 +478,22 @@ def get_sales_requests(
         limit_page_length=limit,
     )
 
-    for row in rows:
-        row["assigned_to_name"] = None
+    lead_ids = list({r["lead"] for r in rows if r.get("lead")})
+    lead_names = dict(frappe.get_all(
+        "Lead",
+        filters={"name": ["in", lead_ids]},
+        fields=["name", "lead_name"],
+        as_list=True,
+    )) if lead_ids else {}
 
-        if row.get("assigned_to"):
-            row["assigned_to_name"] = frappe.db.get_value(
-                "User",
-                row["assigned_to"],
-                "full_name",
-            )
+    for row in rows:
+        row["assigned_to_name"] = (
+            frappe.get_cached_value("User", row["assigned_to"], "full_name")
+            if row.get("assigned_to") else None
+        )
+        row["lead_name"] = lead_names.get(row.get("lead")) or row.get("lead")
+        row["has_transcript"] = 1 if row.pop("call_transcript", None) else 0
+        row["request_text"] = (row.get("request_text") or "")[:300]
 
     return {
         "count": len(rows),
