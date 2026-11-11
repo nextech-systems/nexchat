@@ -4,7 +4,7 @@
 frappe.pages["nexchat-center"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __("NexChat Center"),
+		title: __("NexChat"),
 		single_column: true,
 	});
 	new NexChatCenter(page);
@@ -16,13 +16,18 @@ class NexChatCenter {
 		this.conversations = [];
 		this.active = null;
 		this.tab = "mine";
+		this.view = "inbox";
 		this.availability = "Available";
 		this.sending = false;
 		this.search = "";
 		this.make();
 		this.bind_realtime();
 		this.refresh_all();
-		this.poll = setInterval(() => this.refresh_all(true), 45000);
+		this.poll = setInterval(() => {
+			if (!this.is_visible()) return;
+			this.refresh_all(true);
+			if (this.view === "requests" && this.board) this.board.refresh();
+		}, 45000);
 		this.hb = setInterval(() => this.heartbeat(), 60000);
 		this.heartbeat();
 	}
@@ -71,6 +76,10 @@ class NexChatCenter {
 				.nxc-cust .btn { width:100%; margin-top:6px; font-size:12px; }
 			</style>
 			<div class="nxc-bar">
+				<div class="btn-group nxc-views">
+					<button class="btn btn-xs btn-primary nxc-view" data-view="inbox">${__("Inbox")}</button>
+					<button class="btn btn-xs btn-default nxc-view" data-view="requests">&#9742; ${__("Requests")} <span class="nxc-c-req"></span></button>
+				</div>
 				<span class="nxc-avail"><select class="form-control">
 					<option>Available</option><option>Away</option><option>Off</option>
 				</select></span>
@@ -93,10 +102,14 @@ class NexChatCenter {
 				<div class="nxc-col nxc-thread"><div class="nxc-empty">${__("Select a conversation")}</div></div>
 				<div class="nxc-col nxc-cust"><div class="nxc-empty">${__("No customer")}</div></div>
 			</div>
+			<div class="nxc-requests" style="display:none"></div>
 		`);
 		this.$list = this.page.main.find(".nxc-list");
 		this.$thread = this.page.main.find(".nxc-thread");
 		this.$cust = this.page.main.find(".nxc-cust");
+		this.$grid = this.page.main.find(".nxc-grid");
+		this.$req = this.page.main.find(".nxc-requests");
+		this.page.main.find(".nxc-view").on("click", (e) => this.set_view(e.currentTarget.dataset.view));
 
 		this.page.main.find(`.nxc-tab[data-tab="${this.tab}"]`).addClass("active");
 		this.page.main.find(".nxc-tab").on("click", (e) => {
@@ -118,6 +131,24 @@ class NexChatCenter {
 			this.search = e.target.value;
 			t = setTimeout(() => this.load_conversations(), 300);
 		});
+	}
+
+	set_view(view) {
+		this.view = view;
+		this.page.main.find(".nxc-view").removeClass("btn-primary").addClass("btn-default");
+		this.page.main.find(`.nxc-view[data-view="${view}"]`).removeClass("btn-default").addClass("btn-primary");
+		this.$grid.toggle(view === "inbox");
+		this.page.main.find(".nxc-counts").toggle(view === "inbox");
+		this.$req.toggle(view === "requests");
+		if (view !== "requests") return;
+		if (this.board) { this.board.refresh(); return; }
+		frappe.require("/assets/nexchat/js/nexchat_requests_board.js", () => {
+			this.board = new NexChatSalesRequestHub(this.$req);
+		});
+	}
+
+	is_visible() {
+		return frappe.get_route()[0] === "nexchat-center" && !document.hidden;
 	}
 
 	heartbeat() {
@@ -144,6 +175,13 @@ class NexChatCenter {
 
 	refresh_all(silent) {
 		this.load_conversations();
+		frappe.call({
+			method: "nexchat.nexchat.doctype.sales_request.sales_request.get_sales_request_summary",
+			callback: (r) => {
+				const n = (r.message && r.message.new) || 0;
+				this.page.main.find(".nxc-c-req").text(n ? `(${n})` : "");
+			},
+		});
 		frappe.call({ method: "nexchat.api.workload_counts", callback: (r) => {
 			if (!r.message) return;
 			this.page.main.find(".nxc-c-mine").text(r.message.mine);
