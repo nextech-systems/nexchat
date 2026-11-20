@@ -18,6 +18,7 @@ the Conversation Queue mirror.
 """
 
 import frappe
+from nexchat.ntfy_alerts import queue_assignment_alert
 from nexchat.web_security import staff_doc, publish
 from frappe.utils import now_datetime, time_diff_in_seconds, get_url_to_form
 from nexchat.nexchat.doctype.conversation_queue.conversation_queue import sync_queue
@@ -116,6 +117,8 @@ def claim(conversation, doctype="WA Conversation"):
 		return {"requires_details": True}
 
 	me = frappe.session.user
+	previous = frappe.db.get_value(doctype, conversation, "assigned_agent", for_update=True)
+	claimed_at = now_datetime()
 	# atomic: only set if currently unassigned
 	frappe.db.sql(
 		f"""
@@ -123,7 +126,7 @@ def claim(conversation, doctype="WA Conversation"):
 		SET assigned_agent = %(me)s, claimed_at = %(now)s, last_agent = %(me)s
 		WHERE name = %(name)s AND IFNULL(assigned_agent, '') = ''
 		""",
-		{"me": me, "now": now_datetime(), "name": conversation},
+		{"me": me, "now": claimed_at, "name": conversation},
 	)
 	frappe.db.commit()
 
@@ -133,6 +136,8 @@ def claim(conversation, doctype="WA Conversation"):
 		frappe.throw(f"Already claimed by {owner}")
 	_sync(doctype, conversation)
 	publish("nexchat_lock", {"conversation": conversation, "source_doctype": doctype, "agent": me}, after_commit=True)
+	if not previous:
+		queue_assignment_alert(doctype, conversation, me, claimed_at)
 	return me
 
 
@@ -165,14 +170,21 @@ def take_over(conversation, doctype="WA Conversation"):
 	if not _prepare_web_claim(doctype, conversation):
 		return {"requires_details": True}
 	me = frappe.session.user
+	previous = frappe.db.get_value(
+		doctype, conversation, ["assigned_agent", "claimed_at"], as_dict=True, for_update=True
+	)
+	owner_changed = not previous or previous.assigned_agent != me
+	claimed_at = now_datetime() if owner_changed else previous.claimed_at or now_datetime()
 	frappe.db.set_value(
 		doctype,
 		conversation,
-		{"assigned_agent": me, "claimed_at": now_datetime(), "last_agent": me, "sla_state": "OK"},
+		{"assigned_agent": me, "claimed_at": claimed_at, "last_agent": me, "sla_state": "OK"},
 		update_modified=False,
 	)
 	_sync(doctype, conversation)
 	publish("nexchat_lock", {"conversation": conversation, "source_doctype": doctype, "agent": me}, after_commit=True)
+	if owner_changed:
+		queue_assignment_alert(doctype, conversation, me, claimed_at, after_commit=True)
 	return me
 
 
