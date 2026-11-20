@@ -22,6 +22,8 @@ raised, since this always runs from a background job triggered by normal
 message receipt - a bug here must never break that.
 """
 
+import re
+
 import frappe
 import requests
 
@@ -74,11 +76,17 @@ def _ai_eligible(conv):
 	configured, and no human already owns this thread. Shared by the
 	pre-LLM gate and the post-generation re-check so both agree on
 	exactly what "eligible" means."""
+	if conv.get("doctype") == "Web Conversation" and conv.get("status") != "Open":
+		return False
 	settings = _settings()
 	if not settings.get("ai_enabled"):
 		return False
 	if not settings.get("ai_ollama_url"):
 		return False
+	if conv.doctype == "Web Conversation":
+		from nexchat.website import _handover_pending
+		if _handover_pending(conv):
+			return False
 	if conv.get("assigned_agent"):
 		return False
 	return True
@@ -94,6 +102,9 @@ def should_attempt_auto_reply(conversation_doc, message_text):
 	if not text:
 		return False
 
+	if conversation_doc.get("doctype") == "Web Conversation" and re.search(
+		r"\b(agent|human|representative)\b|\b(speak|talk) to (someone|a person)|\bcall me\b", text):
+		return False
 	settings = _settings()
 	for kw in _escalation_keywords(settings):
 		if kw in text:
@@ -150,14 +161,14 @@ def _dispatch_send(source_doctype, conv, text, by_bot, is_acknowledgment):
 	channel - used by both the real AI reply and the canned escalation
 	acknowledgment, so a fourth channel only needs one new branch here."""
 	if source_doctype == "WA Conversation":
-		from nexchat.api import send_message
-		send_message(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
+		from nexchat.api import _send_message as send_message
+		return send_message(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
 	elif source_doctype == "Web Conversation":
-		from nexchat.website import send_reply
-		send_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
+		from nexchat.website import _send_reply as send_reply
+		return send_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
 	elif source_doctype == "Email Conversation":
-		from nexchat.email_channel import send_email_reply
-		send_email_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
+		from nexchat.email_channel import _send_email_reply as send_email_reply
+		return send_email_reply(conv.name, text, by_bot=by_bot, is_acknowledgment=is_acknowledgment)
 
 
 def _send_escalation_ack(source_doctype, conv):
@@ -169,12 +180,19 @@ def _send_escalation_ack(source_doctype, conv):
 	deliberately NOT treated as a real answer, so the SLA reminder/
 	escalation timers in locks.py keep running exactly as if nothing
 	had been sent, and a human still gets alerted on schedule."""
+	if source_doctype == "Web Conversation":
+		from nexchat.website import _request_handover, _complete
+		conv = _request_handover(conv.name)
+		if conv.status != "Open" or not _complete(conv):
+			return
 	if conv.get("ai_ack_sent"):
 		return
 	settings = _settings()
 	ack_text = settings.get("ai_escalation_ack_message") or DEFAULT_ESCALATION_ACK
 
-	_dispatch_send(source_doctype, conv, ack_text, by_bot=True, is_acknowledgment=True)
+	sent = _dispatch_send(source_doctype, conv, ack_text, by_bot=True, is_acknowledgment=True)
+	if source_doctype == "Web Conversation" and not sent:
+		return
 
 	frappe.db.set_value(source_doctype, conv.name, "ai_ack_sent", 1, update_modified=False)
 
@@ -188,6 +206,11 @@ def maybe_auto_reply(source_doctype, conversation_name, message_text):
 		if not frappe.db.exists(source_doctype, conversation_name):
 			return
 		conv = frappe.get_doc(source_doctype, conversation_name)
+		if source_doctype == "Web Conversation" and conv.status == "Open":
+			settings = _settings()
+			if not settings.get("ai_enabled") or not settings.get("ai_ollama_url"):
+				_send_escalation_ack(source_doctype, conv)
+				return
 
 		text = (message_text or "").strip()
 		if not text:

@@ -31,7 +31,8 @@
   "activity_column",
   "unread_count",
   "last_message_preview",
-  "ai_ack_sent"
+  "ai_ack_sent",
+  "handover_requested"
  ],
  "fields": [
   {
@@ -200,6 +201,14 @@
    "label": "AI Acknowledgment Sent",
    "read_only": 1,
    "description": "One-time canned escalation acknowledgment already sent - prevents repeating it on every subsequent message while still unassigned"
+  },
+  {
+   "fieldname": "handover_requested",
+   "fieldtype": "Check",
+   "label": "Agent Handover Requested",
+   "default": "0",
+   "read_only": 1,
+   "description": "Pauses website AI and requests contact details before staff takeover."
   }
  ],
  "links": [],

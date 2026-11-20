@@ -6,6 +6,7 @@ import time
 
 import requests
 import frappe
+from nexchat.web_security import staff_doc, publish, filter_rows
 
 
 def _default_session_id(settings):
@@ -111,8 +112,16 @@ def _enforce_send_limits(settings, session):
 				time.sleep(min(gap - elapsed, 10))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def send_message(conversation, message, by_bot=False, is_acknowledgment=False):
+	"""Staff API. Bot flags are reserved for private background calls."""
+	if frappe.utils.cint(by_bot) or frappe.utils.cint(is_acknowledgment):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	staff_doc("WA Conversation", conversation, "write")
+	return _send_message(conversation, message, by_bot=False, is_acknowledgment=False)
+
+
+def _send_message(conversation, message, by_bot=False, is_acknowledgment=False):
 	"""Send a text message into an existing conversation. Returns the
 	WA Chat Message name on success. by_bot=True is for the AI auto-reply
 	path only (nexchat.ai_reply) - it skips the claim/lock flow entirely,
@@ -125,8 +134,8 @@ def send_message(conversation, message, by_bot=False, is_acknowledgment=False):
 	reminder/escalation timers in locks.py keep running normally."""
 	by_bot = frappe.utils.cint(by_bot)
 	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
-	if not by_bot and not frappe.has_permission("WA Conversation", "write"):
-		frappe.throw("Not permitted", frappe.PermissionError)
+	if not by_bot:
+		staff_doc("WA Conversation", conversation, "write")
 	message = (message or "").strip()
 	if not message:
 		frappe.throw("Message is empty")
@@ -213,10 +222,11 @@ def send_message(conversation, message, by_bot=False, is_acknowledgment=False):
 		conv_updates["last_outgoing_at"] = now
 	conv.db_set(conv_updates, update_modified=True)
 
-	frappe.publish_realtime(
+	publish(
 		"nexchat_message",
 		{
 			"conversation": conv.name,
+			"source_doctype": "WA Conversation",
 			"message": msg.name,
 			"direction": "Outgoing",
 			"preview": message[:140],
@@ -322,7 +332,7 @@ def get_conversations(search=None, tab="all"):
 		order_by="modified desc",
 		limit_page_length=200,
 	)
-	rows = _scope_rows_by_session(rows, me)
+	rows = filter_rows(_scope_rows_by_session(rows, me), me)
 
 	# WhatsApp-only extras the frontend already displays: resolved_number
 	# and the session label. Website rows leave these blank.
@@ -394,7 +404,8 @@ def get_messages(conversation, source_doctype="WA Conversation", limit=50):
 	if not frappe.db.exists(source_doctype, conversation):
 		frappe.throw(f"Conversation not found: {source_doctype} / {conversation}")
 
-	limit_n = min(frappe.utils.cint(limit) or 50, 200)
+	staff_doc(source_doctype, conversation, "read")
+	limit_n = max(1, min(frappe.utils.cint(limit) or 50, 200))
 
 	if source_doctype == "Email Conversation":
 		comms = frappe.get_all(
@@ -441,6 +452,7 @@ def mark_read(conversation, source_doctype="WA Conversation"):
 		frappe.throw("Unknown channel")
 	if not frappe.has_permission(source_doctype, "write"):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	staff_doc(source_doctype, conversation, "write")
 	if frappe.db.exists(source_doctype, conversation):
 		frappe.db.set_value(
 			source_doctype, conversation, "unread_count", 0,
@@ -464,7 +476,7 @@ def workload_counts():
 		filters={"status": "Open"},
 		fields=["channel", "source_name", "assigned_agent", "sla_state"],
 	)
-	rows = _scope_rows_by_session(rows, me)
+	rows = filter_rows(_scope_rows_by_session(rows, me), me)
 
 	mine = sum(1 for r in rows if r["assigned_agent"] == me)
 	unassigned = sum(1 for r in rows if not r["assigned_agent"])
@@ -481,7 +493,7 @@ def customer_summary(conversation, source_doctype="WA Conversation"):
 		frappe.throw("Unknown channel")
 	if not frappe.has_permission(source_doctype, "read"):
 		frappe.throw("Not permitted", frappe.PermissionError)
-	conv = frappe.get_doc(source_doctype, conversation)
+	conv = staff_doc(source_doctype, conversation, "read")
 	out = {
 		"customer": conv.customer,
 		"contact": conv.contact,
@@ -491,6 +503,8 @@ def customer_summary(conversation, source_doctype="WA Conversation"):
 	}
 	if not conv.customer:
 		return out
+	if not frappe.has_permission("Customer", "read", doc=frappe.get_doc("Customer", conv.customer)):
+		return {"display_name": conv.display_name}
 
 	cust = frappe.get_cached_doc("Customer", conv.customer)
 	out["customer_name"] = cust.customer_name
@@ -498,17 +512,21 @@ def customer_summary(conversation, source_doctype="WA Conversation"):
 	# outstanding balance via GL (party balance)
 	try:
 		from erpnext.accounts.utils import get_balance_on
+		if not frappe.has_permission("GL Entry", "read"):
+			raise frappe.PermissionError("Not permitted")
 		out["balance"] = get_balance_on(
 			party_type="Customer", party=conv.customer
 		)
 	except Exception:
 		out["balance"] = None
 
-	out["open_orders"] = frappe.db.count(
-		"Sales Order",
-		{"customer": conv.customer, "docstatus": 1, "status": ["not in", ["Closed", "Completed"]]},
-	)
-	last_so = frappe.get_all(
+	if not frappe.has_permission("Sales Order", "read"):
+		return out
+	out["open_orders"] = frappe.get_list(
+		"Sales Order", filters={"customer": conv.customer, "docstatus": 1,
+		"status": ["not in", ["Closed", "Completed"]]}, fields=["count(name) as count"]
+	)[0].count
+	last_so = frappe.get_list(
 		"Sales Order",
 		filters={"customer": conv.customer, "docstatus": 1},
 		fields=["transaction_date"],

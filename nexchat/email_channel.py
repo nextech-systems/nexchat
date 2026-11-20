@@ -22,6 +22,7 @@ hook is a no-op until that setting is configured.
 """
 
 import frappe
+from nexchat.web_security import staff_doc, publish
 from frappe.utils import now_datetime
 
 from nexchat.locks import sync_conversation, claim_on_reply
@@ -92,7 +93,7 @@ def on_communication_insert(doc, method=None):
 		)
 		sync_conversation(DOCTYPE, conv.name)
 
-		frappe.publish_realtime(
+		publish(
 			"nexchat_message",
 			{
 				"conversation": conv.name,
@@ -119,8 +120,16 @@ def on_communication_insert(doc, method=None):
 		frappe.log_error(frappe.get_traceback(), "NexChat Email Channel")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def send_email_reply(conversation, message, subject=None, by_bot=False, is_acknowledgment=False):
+	"""Staff API. Bot flags are reserved for private background calls."""
+	if frappe.utils.cint(by_bot) or frappe.utils.cint(is_acknowledgment):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	staff_doc(DOCTYPE, conversation, "write")
+	return _send_email_reply(conversation, message, subject=subject, by_bot=False, is_acknowledgment=False)
+
+
+def _send_email_reply(conversation, message, subject=None, by_bot=False, is_acknowledgment=False):
 	"""Agent (or AI) reply from NexChat Center. Creates the outgoing
 	Communication explicitly rather than relying on frappe.sendmail's
 	side effects, so it's threaded onto this Email Conversation the same
@@ -129,8 +138,8 @@ def send_email_reply(conversation, message, subject=None, by_bot=False, is_ackno
 	counted as answering the customer, so the SLA timers keep running."""
 	by_bot = frappe.utils.cint(by_bot)
 	is_acknowledgment = frappe.utils.cint(is_acknowledgment)
-	if not by_bot and not frappe.has_permission(DOCTYPE, "write"):
-		frappe.throw("Not permitted", frappe.PermissionError)
+	if not by_bot:
+		staff_doc(DOCTYPE, conversation, "write")
 
 	message = (message or "").strip()
 	if not message:
@@ -174,7 +183,7 @@ def send_email_reply(conversation, message, subject=None, by_bot=False, is_ackno
 	conv.db_set(conv_updates, update_modified=True)
 	sync_conversation(DOCTYPE, conv.name)
 
-	frappe.publish_realtime(
+	publish(
 		"nexchat_message",
 		{
 			"conversation": conv.name,
@@ -192,6 +201,7 @@ def send_email_reply(conversation, message, subject=None, by_bot=False, is_ackno
 
 @frappe.whitelist()
 def mark_read(conversation):
+	staff_doc(DOCTYPE, conversation, "write")
 	if not frappe.has_permission(DOCTYPE, "write"):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	frappe.db.set_value(DOCTYPE, conversation, "unread_count", 0, update_modified=False)

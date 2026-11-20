@@ -18,6 +18,7 @@ the Conversation Queue mirror.
 """
 
 import frappe
+from nexchat.web_security import staff_doc, publish
 from frappe.utils import now_datetime, time_diff_in_seconds, get_url_to_form
 from nexchat.nexchat.doctype.conversation_queue.conversation_queue import sync_queue
 
@@ -95,13 +96,24 @@ def _check_channel_doctype(doctype):
 		frappe.throw(f"Unknown conversation channel doctype: {doctype}")
 
 
+def _prepare_web_claim(doctype, conversation):
+	if doctype != "Web Conversation":
+		return True
+	from nexchat.website import _request_handover, _complete
+	conv = _request_handover(conversation)
+	if conv.status != "Open":
+		frappe.throw("This chat has ended. The visitor must start a new chat.")
+	return _complete(conv)
+
+
 @frappe.whitelist()
 def claim(conversation, doctype="WA Conversation"):
 	"""Atomically claim an unassigned conversation. Returns the winning agent.
 	If already claimed by someone else, raises with their name."""
 	_check_channel_doctype(doctype)
-	if not frappe.has_permission(doctype, "write"):
-		frappe.throw("Not permitted", frappe.PermissionError)
+	staff_doc(doctype, conversation, "write")
+	if not _prepare_web_claim(doctype, conversation):
+		return {"requires_details": True}
 
 	me = frappe.session.user
 	# atomic: only set if currently unassigned
@@ -120,7 +132,7 @@ def claim(conversation, doctype="WA Conversation"):
 		owner = frappe.get_cached_value("User", current, "full_name") or current
 		frappe.throw(f"Already claimed by {owner}")
 	_sync(doctype, conversation)
-	frappe.publish_realtime("nexchat_lock", {"conversation": conversation, "agent": me}, after_commit=True)
+	publish("nexchat_lock", {"conversation": conversation, "source_doctype": doctype, "agent": me}, after_commit=True)
 	return me
 
 
@@ -128,13 +140,17 @@ def claim(conversation, doctype="WA Conversation"):
 def release(conversation, doctype="WA Conversation"):
 	"""Release a claim. last_agent is preserved for sticky routing."""
 	_check_channel_doctype(doctype)
-	if not frappe.has_permission(doctype, "write"):
-		frappe.throw("Not permitted", frappe.PermissionError)
+	staff_doc(doctype, conversation, "write")
+	owner = frappe.db.get_value(doctype, conversation, "assigned_agent")
+	roles = frappe.get_roles(frappe.session.user)
+	if owner and owner != frappe.session.user and not {"NexChat Supervisor", "System Manager"}.intersection(roles):
+		frappe.throw("Only the assigned agent or a supervisor may release this conversation", frappe.PermissionError)
+
 	frappe.db.set_value(
 		doctype, conversation, "assigned_agent", None, update_modified=False
 	)
 	_sync(doctype, conversation)
-	frappe.publish_realtime("nexchat_lock", {"conversation": conversation, "agent": None}, after_commit=True)
+	publish("nexchat_lock", {"conversation": conversation, "source_doctype": doctype, "agent": None}, after_commit=True)
 	return True
 
 
@@ -142,9 +158,12 @@ def release(conversation, doctype="WA Conversation"):
 def take_over(conversation, doctype="WA Conversation"):
 	"""Supervisor override: claim regardless of current lock."""
 	_check_channel_doctype(doctype)
+	staff_doc(doctype, conversation, "write")
 	roles = frappe.get_roles(frappe.session.user)
 	if "NexChat Supervisor" not in roles and "System Manager" not in roles:
 		frappe.throw("Supervisor only", frappe.PermissionError)
+	if not _prepare_web_claim(doctype, conversation):
+		return {"requires_details": True}
 	me = frappe.session.user
 	frappe.db.set_value(
 		doctype,
@@ -153,7 +172,7 @@ def take_over(conversation, doctype="WA Conversation"):
 		update_modified=False,
 	)
 	_sync(doctype, conversation)
-	frappe.publish_realtime("nexchat_lock", {"conversation": conversation, "agent": me}, after_commit=True)
+	publish("nexchat_lock", {"conversation": conversation, "source_doctype": doctype, "agent": me}, after_commit=True)
 	return me
 
 
@@ -161,6 +180,9 @@ def claim_on_reply(conversation, user, doctype="WA Conversation"):
 	"""Called from send_message: first reply claims if unassigned.
 	Not whitelisted directly, but still validated since it reaches raw SQL."""
 	_check_channel_doctype(doctype)
+	staff_doc(doctype, conversation, "write", user=user)
+	if not _prepare_web_claim(doctype, conversation):
+		frappe.throw("Waiting for the visitor to provide name, email and phone.")
 	current = frappe.db.get_value(doctype, conversation, "assigned_agent")
 	if not current:
 		frappe.db.sql(
@@ -172,10 +194,15 @@ def claim_on_reply(conversation, user, doctype="WA Conversation"):
 			{"u": user, "now": now_datetime(), "name": conversation},
 		)
 	else:
+		if current != user:
+			frappe.throw("Claim or take over the conversation before replying", frappe.PermissionError)
 		# replying always refreshes last_agent
 		frappe.db.set_value(
 			doctype, conversation, "last_agent", user, update_modified=False
 		)
+	if frappe.db.get_value(doctype, conversation, "assigned_agent") != user:
+		frappe.throw("Conversation was claimed by another agent", frappe.PermissionError)
+
 	_sync(doctype, conversation)
 
 
@@ -237,6 +264,12 @@ def run_sla_checks():
 
 
 def _remind(c, now, doctype="WA Conversation"):
+	if doctype == "Web Conversation":
+		from nexchat.website import _lock_conversation
+		c = _lock_conversation(c.name)
+		from nexchat.website import _complete, _handover_pending
+		if c.status != "Open" or not _complete(c) or not _handover_pending(c):
+			return
 	frappe.db.set_value(
 		doctype, c.name,
 		{"sla_state": "Reminded", "reminded_at": now},
@@ -256,6 +289,12 @@ def _remind(c, now, doctype="WA Conversation"):
 
 
 def _escalate(c, settings, waited, doctype="WA Conversation", channel=None):
+	if doctype == "Web Conversation":
+		from nexchat.website import _lock_conversation
+		c = _lock_conversation(c.name)
+		from nexchat.website import _complete, _handover_pending
+		if c.status != "Open" or not _complete(c) or not _handover_pending(c):
+			return
 	channel = channel or CHANNEL_DOCTYPES.get(doctype, doctype)
 	# lift the lock so anyone can take it
 	frappe.db.set_value(
@@ -281,7 +320,7 @@ def _escalate(c, settings, waited, doctype="WA Conversation", channel=None):
 			frappe.sendmail(recipients=supervisors, subject=subject, message=msg)
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "NexChat escalation email")
-	frappe.publish_realtime("nexchat_escalation", {"conversation": c.name}, after_commit=True)
+	publish("nexchat_escalation", {"conversation": c.name, "source_doctype": doctype}, after_commit=True)
 	frappe.db.commit()
 
 

@@ -20,6 +20,7 @@ class NexChatCenter {
 		this.availability = "Available";
 		this.sending = false;
 		this.search = "";
+		this.awaiting_only = false;
 		this.make();
 		this.bind_realtime();
 		this.refresh_all();
@@ -45,7 +46,10 @@ class NexChatCenter {
 				.nxc-tab { flex:1; text-align:center; padding:8px 0; cursor:pointer; color:var(--text-muted); }
 				.nxc-tab.active { font-weight:600; color:var(--text-color); border-bottom:2px solid var(--primary); }
 				.nxc-search { padding:8px; border-bottom:1px solid var(--border-color); }
-				.nxc-search input { width:100%; }
+				.nxc-search input.form-control { width:100%; }
+				.nxc-awaiting-filter { display:flex;gap:6px;align-items:center;font-size:11px;margin:8px 0 0;font-weight:400; }
+				.nxc-list-summary { font-size:10px;color:var(--text-muted);margin-top:5px; }
+				.nxc-awaiting { display:inline-block;font-size:10px;border:1px solid var(--orange,#d97706);border-radius:5px;padding:1px 5px;margin-top:5px;color:var(--text-color); }
 				.nxc-list { overflow-y:auto; flex:1; }
 				.nxc-conv { padding:9px 11px; border-bottom:1px solid var(--border-color); cursor:pointer; }
 				.nxc-conv:hover { background:var(--bg-color); }
@@ -96,7 +100,10 @@ class NexChatCenter {
 						<div class="nxc-tab" data-tab="unassigned">Unassigned</div>
 						<div class="nxc-tab" data-tab="all">All</div>
 					</div>
-					<div class="nxc-search"><input class="form-control" placeholder="${__("Search")}"></div>
+					<div class="nxc-search"><input class="form-control" placeholder="${__("Search")}">
+						<label class="nxc-awaiting-filter"><input type="checkbox" class="nxc-awaiting-only"> ${__("Awaiting replies only")}</label>
+						<div class="nxc-list-summary"></div>
+					</div>
 					<div class="nxc-list"></div>
 				</div>
 				<div class="nxc-col nxc-thread"><div class="nxc-empty">${__("Select a conversation")}</div></div>
@@ -125,8 +132,12 @@ class NexChatCenter {
 				callback: () => this.refresh_all(true),
 			});
 		});
+		this.page.main.find(".nxc-awaiting-only").on("change", (e) => {
+			this.awaiting_only = e.currentTarget.checked;
+			this.render_list();
+		});
 		let t = null;
-		this.page.main.find(".nxc-search input").on("input", (e) => {
+		this.page.main.find(".nxc-search input.form-control").on("input", (e) => {
 			clearTimeout(t);
 			this.search = e.target.value;
 			t = setTimeout(() => this.load_conversations(), 300);
@@ -191,23 +202,55 @@ class NexChatCenter {
 	}
 
 	load_conversations() {
+		const request = this.list_request = (this.list_request || 0) + 1;
 		frappe.call({
 			method: "nexchat.api.get_conversations",
 			args: { search: this.search || null, tab: this.tab },
-			callback: (r) => { this.conversations = r.message || []; this.render_list(); },
+			callback: (r) => {
+				if (request !== this.list_request) return;
+				this.conversations = r.message || [];
+				if (this.active) {
+					const fresh = this.conversations.find((c) => c.name === this.active.name && c.source_doctype === this.active.source_doctype);
+					if (fresh) {
+						const ownership_changed = fresh.assigned_agent !== this.active.assigned_agent || fresh.status !== this.active.status;
+						this.active = fresh;
+						if (ownership_changed) this.refresh_thread(fresh);
+						else this.$thread.find(".nxc-response-status").text(this.is_waiting(fresh) ? __("Awaiting reply") : "");
+					}
+				}
+				this.render_list();
+			},
 		});
+	}
+
+	is_waiting(c) {
+		// Acknowledgements do not update last_outgoing_at; the API already
+		// distinguishes those from actual human/AI answers. Reading is separate.
+		return c.status === "Open" && (c.waiting === true || c.waiting === 1);
+	}
+
+	refresh_thread(c) {
+		this.thread_drafts = this.thread_drafts || Object.create(null);
+		const key = c.source_doctype + "\n" + c.name;
+		if (this.$input) this.thread_drafts[key] = this.$input.val() || "";
+		this.render_thread(c);
+		if (this.$input) this.$input.val(this.thread_drafts[key] || "");
+		this.load_messages(c.name);
 	}
 
 	render_list() {
 		const esc = frappe.utils.escape_html;
 		this.$list.empty();
-		if (!this.conversations.length) {
+		const visible = this.conversations.filter((c) => !this.awaiting_only || this.is_waiting(c));
+		const waiting = this.conversations.filter((c) => this.is_waiting(c)).length;
+		this.page.main.find(".nxc-list-summary").text(`${waiting} ${__("awaiting reply")} · ${this.conversations.length} ${__("loaded in this tab")}`);
+		if (!visible.length) {
 			this.$list.html(`<div class="nxc-conv text-muted">${__("Nothing here")}</div>`);
 			return;
 		}
-		const multi = new Set(this.conversations.map((x) => x.session_label).filter(Boolean)).size > 1;
-		this.conversations.forEach((c) => {
-			const cls = (this.active && this.active.name === c.name) ? "active" : (c.sticky_mine ? "sticky" : "");
+		const multi = new Set(visible.map((x) => x.session_label).filter(Boolean)).size > 1;
+		visible.forEach((c) => {
+			const cls = (this.active && this.active.name === c.name && this.active.source_doctype === c.source_doctype) ? "active" : (c.sticky_mine ? "sticky" : "");
 			const name = esc(c.display_name || c.name);
 			const sub = c.customer ? esc(c.customer) : (c.lead ? __("Lead") : (c.sticky_mine ? __("Returning - yours") : __("Unlinked")));
 			const CHANNEL_COLORS = {
@@ -218,13 +261,14 @@ class NexChatCenter {
 			const channel_color = CHANNEL_COLORS[c.channel] || "var(--bg-color)";
 			const channel_chip = ` <span class="nxc-chip" style="background:${channel_color}">${esc(c.channel || "")}</span>`;
 			const chip = (multi && c.session_label ? ` <span class="nxc-chip">${esc(c.session_label)}</span>` : "") + channel_chip;
-			const badge = c.unread_count ? `<span class="nxc-badge">${c.unread_count}</span>` : "";
-			const clock = (c.waiting && c.sla_state === "Escalated") ? `<span class="nxc-clock">overdue</span>`
-				: (c.waiting && c.sla_state === "Reminded") ? `<span class="nxc-clock">waiting</span>` : "";
+			const badge = c.unread_count ? `<span class="nxc-badge" title="${__("Unread messages")}">${esc(String(c.unread_count))}</span>` : "";
+			const clock = (this.is_waiting(c) && c.sla_state === "Escalated") ? `<span class="nxc-clock">overdue</span>`
+				: (this.is_waiting(c) && c.sla_state === "Reminded") ? `<span class="nxc-clock">waiting</span>` : "";
 			const $r = $(`<div class="nxc-conv ${cls}">
-				<div class="nxc-conv-top"><span class="nxc-conv-name">${name}</span>${badge||clock}</div>
+				<div class="nxc-conv-top"><span class="nxc-conv-name">${name}</span>${badge}</div>
 				<div class="nxc-sub">${sub}${chip}</div>
 				<div class="nxc-prev">${esc(c.last_message_preview || "")}</div>
+				${this.is_waiting(c) ? `<div><span class="nxc-awaiting">${__("Awaiting reply")}</span> ${clock}</div>` : ""}
 			</div>`);
 			$r.on("click", () => this.open(c));
 			this.$list.append($r);
@@ -244,7 +288,12 @@ class NexChatCenter {
 		const esc = frappe.utils.escape_html;
 		const me = frappe.session.user;
 		let banner = "", composer = true;
-		if (c.assigned_agent && c.assigned_agent !== me) {
+		if (c.status !== "Open") {
+			banner = `<div class="nxc-banner">${__("Chat ended")}</div>`;
+			composer = false;
+		} else if (!c.assigned_agent) {
+			banner = `<div class="nxc-banner">${__("Unassigned")} <button class="btn btn-xs btn-primary nxc-claim" style="margin-left:6px">${__("Assign to me")}</button></div>`;
+		} else if (c.assigned_agent && c.assigned_agent !== me) {
 			banner = `<div class="nxc-banner">${__("Claimed by")} ${esc(c.assigned_agent_name || c.assigned_agent)} — ${__("read only")} <button class="btn btn-xs nxc-takeover" style="margin-left:6px">${__("Take over")}</button></div>`;
 			composer = false;
 		} else if (c.assigned_agent === me) {
@@ -254,6 +303,7 @@ class NexChatCenter {
 			<div class="nxc-head">
 				<div style="flex:1;min-width:0">
 					<div class="nxc-head-name">${esc(c.display_name || c.name)}</div>
+					<span class="nxc-response-status nxc-clock">${this.is_waiting(c) ? __("Awaiting reply") : ""}</span>
 					<div class="nxc-head-sub">${esc(c.resolved_number || c.name)}${c.session_label ? " · " + esc(c.session_label) : ""}</div>
 				</div>
 			</div>
@@ -262,27 +312,38 @@ class NexChatCenter {
 			${composer ? `<div class="nxc-compose"><textarea class="form-control" placeholder="${__("Type a reply")}" maxlength="4096"></textarea><button class="btn btn-primary btn-sm nxc-send">${__("Send")}</button></div>` : ""}
 		`);
 		this.$msgs = this.$thread.find(".nxc-msgs");
+		this.$input = null;
 		if (composer) {
 			this.$input = this.$thread.find("textarea");
 			this.$thread.find(".nxc-send").on("click", () => this.send());
 			this.$input.on("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send(); }});
 		}
+		this.$thread.find(".nxc-claim").on("click", () => this.lock_action("claim", c.name, c.source_doctype));
 		this.$thread.find(".nxc-release").on("click", () => this.lock_action("release", c.name, c.source_doctype));
 		this.$thread.find(".nxc-takeover").on("click", () => this.lock_action("take_over", c.name, c.source_doctype));
 	}
 
 	lock_action(action, name, source_doctype) {
+		const channel = source_doctype || "WA Conversation";
 		frappe.call({
 			method: `nexchat.locks.${action}`,
-			args: { conversation: name, doctype: source_doctype || "WA Conversation" },
-			callback: () => this.load_conversations(),
+			args: { conversation: name, doctype: channel },
+			callback: (r) => {
+				if (r.message && r.message.requires_details) {
+					frappe.msgprint(__("Contact details requested. Waiting for the visitor to provide name, email and phone before takeover."));
+				} else if (this.active && this.active.name === name && this.active.source_doctype === channel) {
+					this.active = Object.assign({}, this.active, { assigned_agent: action === "release" ? null : frappe.session.user });
+					this.refresh_thread(this.active);
+				}
+				this.load_conversations();
+			},
 		});
 	}
 
 	load_messages(name) {
 		const source_doctype = (this.active && this.active.name === name) ? this.active.source_doctype : "WA Conversation";
 		frappe.call({ method: "nexchat.api.get_messages", args: { conversation: name, source_doctype, limit: 50 }, callback: (r) => {
-			if (!this.active || this.active.name !== name || !this.$msgs) return;
+			if (!this.active || this.active.name !== name || this.active.source_doctype !== source_doctype || !this.$msgs) return;
 			const esc = frappe.utils.escape_html;
 			this.$msgs.empty();
 			(r.message || []).forEach((m) => {
@@ -298,7 +359,7 @@ class NexChatCenter {
 	}
 
 	send() {
-		if (this.sending || !this.active) return;
+		if (this.sending || !this.active || !this.$input || this.active.status !== "Open") return;
 		const text = (this.$input.val() || "").trim();
 		if (!text) return;
 		this.sending = true;
@@ -314,7 +375,13 @@ class NexChatCenter {
 		frappe.call({
 			method,
 			args: { conversation: this.active.name, message: text },
-			callback: () => { this.$input.val(""); this.load_messages(this.active.name); this.refresh_all(true); },
+			callback: (r) => {
+				if (r.message && r.message.requires_details) {
+					frappe.msgprint(__("Contact details requested. Your reply has not been sent. Wait for the visitor to provide name, email and phone, then send again."));
+					return;
+				}
+				this.$input.val(""); this.load_messages(this.active.name); this.refresh_all(true);
+			},
 			always: () => { this.sending = false; $b.prop("disabled", false); this.$input.focus(); },
 		});
 	}
